@@ -571,6 +571,28 @@ app.get("/quiz/:code", (req, res) => {
 });
 
 // =========================================================
+// GET QUIZ BY CODE
+// =========================================================
+
+app.get("/quiz/:code", (req, res) => {
+  const code = req.params.code.toUpperCase();
+
+  const quiz = publishedQuizzes[code];
+
+  if (!quiz) {
+    return res.status(404).json({
+      success: false,
+      error: "Quiz not found",
+    });
+  }
+
+  res.json({
+    success: true,
+    quiz,
+  });
+});
+
+// =========================================================
 // SERVER
 // =========================================================
 
