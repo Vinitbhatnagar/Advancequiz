@@ -112,7 +112,7 @@ function App() {
 
       alert(
         error.response?.data?.error ||
-          "Something went wrong while generating the quiz.",
+        "Something went wrong while generating the quiz.",
       );
     } finally {
       setLoading(false);
@@ -256,9 +256,9 @@ function App() {
         questions: previousQuiz.questions.map((question) =>
           question.id === questionId
             ? {
-                ...question,
-                difficulty: newDifficulty,
-              }
+              ...question,
+              difficulty: newDifficulty,
+            }
             : question,
         ),
       };
@@ -281,9 +281,9 @@ function App() {
         questions: previousQuiz.questions.map((question) =>
           question.id === questionId
             ? {
-                ...question,
-                excluded: true,
-              }
+              ...question,
+              excluded: true,
+            }
             : question,
         ),
       };
@@ -306,9 +306,9 @@ function App() {
         questions: previousQuiz.questions.map((question) =>
           question.id === questionId
             ? {
-                ...question,
-                excluded: false,
-              }
+              ...question,
+              excluded: false,
+            }
             : question,
         ),
       };
@@ -408,8 +408,8 @@ function App() {
 
       alert(
         error.response?.data?.error ||
-          error.message ||
-          "Failed to regenerate this question.",
+        error.message ||
+        "Failed to regenerate this question.",
       );
     } finally {
       setRegeneratingQuestion(null);
@@ -1298,14 +1298,24 @@ function App() {
 
           <button
             className="primary-button"
-            onClick={() => {
+            onClick={async () => {
               if (!studentName || !enrollment || !joinCode) {
                 alert("Please fill all fields.");
-
                 return;
               }
 
-              alert("Student joining system will be connected next.");
+              try {
+                const response = await axios.get(
+                  `${process.env.REACT_APP_API_URL}/quiz/${joinCode}`
+                );
+
+                console.log("Quiz loaded:", response.data);
+
+                alert("Quiz found! Student side will open next.");
+
+              } catch (error) {
+                alert("Quiz not found. Please check the code.");
+              }
             }}
           >
             Join Quiz →
