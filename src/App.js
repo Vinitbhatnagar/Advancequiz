@@ -84,7 +84,7 @@ function App() {
       formData.append("difficulty", difficulty);
 
       const response = await axios.post(
-        "http://localhost:5000/generate-quiz",
+        "https://advancequiz.onrender.com/generate-quiz",
         formData,
       );
 
@@ -344,7 +344,7 @@ function App() {
       console.log("Difficulty:", question.difficulty || "moderate");
 
       const response = await axios.post(
-        "http://localhost:5000/regenerate-question",
+        "https://advancequiz.onrender.com/regenerate-question",
         {
           difficulty: question.difficulty || "moderate",
 
