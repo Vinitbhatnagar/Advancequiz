@@ -112,7 +112,7 @@ function App() {
 
       alert(
         error.response?.data?.error ||
-        "Something went wrong while generating the quiz.",
+          "Something went wrong while generating the quiz.",
       );
     } finally {
       setLoading(false);
@@ -256,9 +256,9 @@ function App() {
         questions: previousQuiz.questions.map((question) =>
           question.id === questionId
             ? {
-              ...question,
-              difficulty: newDifficulty,
-            }
+                ...question,
+                difficulty: newDifficulty,
+              }
             : question,
         ),
       };
@@ -281,9 +281,9 @@ function App() {
         questions: previousQuiz.questions.map((question) =>
           question.id === questionId
             ? {
-              ...question,
-              excluded: true,
-            }
+                ...question,
+                excluded: true,
+              }
             : question,
         ),
       };
@@ -306,9 +306,9 @@ function App() {
         questions: previousQuiz.questions.map((question) =>
           question.id === questionId
             ? {
-              ...question,
-              excluded: false,
-            }
+                ...question,
+                excluded: false,
+              }
             : question,
         ),
       };
@@ -408,8 +408,8 @@ function App() {
 
       alert(
         error.response?.data?.error ||
-        error.message ||
-        "Failed to regenerate this question.",
+          error.message ||
+          "Failed to regenerate this question.",
       );
     } finally {
       setRegeneratingQuestion(null);
@@ -1253,6 +1253,72 @@ function App() {
   // STUDENT PANEL
   // =========================================================
 
+  if (role === "student" && quizStarted && studentQuiz) {
+    const q = studentQuiz.questions[currentQuestion];
+
+    return (
+      <div className="app">
+        <div className="student-container">
+          <div className="student-card">
+            <h1>{studentQuiz.title || "Advance's Quiz"}</h1>
+
+            <p>
+              Question {currentQuestion + 1} of {studentQuiz.questions.length}
+            </p>
+
+            <div className="question-card">
+              <h3>{q.question}</h3>
+
+              {q.options.map((option, index) => (
+                <label key={index} className="option">
+                  <input
+                    type="radio"
+                    name={`question-${currentQuestion}`}
+                    checked={studentAnswers[currentQuestion] === index}
+                    onChange={() =>
+                      setStudentAnswers({
+                        ...studentAnswers,
+                        [currentQuestion]: index,
+                      })
+                    }
+                  />
+
+                  <span>{option}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="question-actions">
+              <button
+                className="secondary-button"
+                disabled={currentQuestion === 0}
+                onClick={() => setCurrentQuestion(currentQuestion - 1)}
+              >
+                ← Previous
+              </button>
+
+              {currentQuestion < studentQuiz.questions.length - 1 ? (
+                <button
+                  className="primary-button"
+                  onClick={() => setCurrentQuestion(currentQuestion + 1)}
+                >
+                  Next →
+                </button>
+              ) : (
+                <button
+                  className="primary-button"
+                  onClick={() => alert("Submit quiz coming next!")}
+                >
+                  Submit Quiz
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <div className="topbar">
@@ -1306,13 +1372,15 @@ function App() {
 
               try {
                 const response = await axios.get(
-                  `${process.env.REACT_APP_API_URL}/quiz/${joinCode}`
+                  `${process.env.REACT_APP_API_URL}/quiz/${joinCode}`,
                 );
 
                 console.log("Quiz loaded:", response.data);
 
-                alert("Quiz found! Student side will open next.");
+                const quiz = response.data.quiz;
 
+                setStudentQuiz(quiz);
+                setQuizStarted(true);
               } catch (error) {
                 alert("Quiz not found. Please check the code.");
               }
