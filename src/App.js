@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import axios from "axios";
 import { QRCodeCanvas } from "qrcode.react";
 import "./App.css";
@@ -9,6 +9,8 @@ function App() {
   // =========================================================
   // TEACHER STATE
   // =========================================================
+  const API =
+    process.env.REACT_APP_API_URL || "https://advancequiz.onrender.com";
 
   const [file, setFile] = useState(null);
 
@@ -62,6 +64,23 @@ function App() {
 
   const [joinCode, setJoinCode] = useState("");
 
+  const [studentQuiz, setStudentQuiz] = useState(null);
+  const [quizStarted, setQuizStarted] = useState(false);
+  const [currentQuestion, setCurrentQuestion] = useState(0);
+  const [studentAnswers, setStudentAnswers] = useState({});
+
+  useEffect(() => {
+    const path = window.location.pathname;
+
+    if (path.startsWith("/join/")) {
+      const code = path.split("/join/")[1];
+
+      if (code) {
+        setRole("student");
+        setJoinCode(code.toUpperCase());
+      }
+    }
+  }, []);
   // =========================================================
   // GENERATE QUIZ WITH AI
   // =========================================================
@@ -326,95 +345,42 @@ function App() {
   const regenerateQuestion = async (questionId) => {
     if (!quiz) return;
 
-    const question = quiz.questions.find((item) => item.id === questionId);
-
+    const question = quiz.questions.find((q) => q.id === questionId);
     if (!question) return;
-
-    // Manual questions don't have
-    // PDF context for regeneration.
-    if (question.source === "manual") {
-      alert(
-        "This is a manually added question. Edit or remove it instead of regenerating it.",
-      );
-
-      return;
-    }
 
     setRegeneratingQuestion(questionId);
 
     try {
-      console.log("Regenerating question:", questionId);
-
-      console.log("Difficulty:", question.difficulty || "moderate");
-
       const response = await axios.post(
         "https://advancequiz.onrender.com/regenerate-question",
         {
           difficulty: question.difficulty || "moderate",
-
           previousQuestion: question.question,
         },
       );
 
-      console.log("AI regeneration response:", response.data);
-
       const newQuestion = response.data.question;
 
-      if (
-        !newQuestion ||
-        !newQuestion.question ||
-        !Array.isArray(newQuestion.options) ||
-        newQuestion.options.length !== 4
-      ) {
-        throw new Error("AI returned an invalid question.");
-      }
-
-      setQuiz((previousQuiz) => {
-        if (!previousQuiz) {
-          return previousQuiz;
-        }
-
-        return {
-          ...previousQuiz,
-
-          questions: previousQuiz.questions.map((item) => {
-            if (item.id !== questionId) {
-              return item;
-            }
-
-            return {
-              ...item,
-
-              // IMPORTANT:
-              // Keep original ID
-              id: item.id,
-
-              question: newQuestion.question,
-
-              options: newQuestion.options,
-
-              correctAnswer: newQuestion.correctAnswer,
-
-              explanation: newQuestion.explanation || "",
-
-              difficulty:
-                newQuestion.difficulty || item.difficulty || "moderate",
-
-              excluded: false,
-
-              source: "ai",
-            };
-          }),
-        };
-      });
+      setQuiz((prevQuiz) => ({
+        ...prevQuiz,
+        questions: prevQuiz.questions.map((item) =>
+          item.id === questionId
+            ? {
+                ...item,
+                question: newQuestion.question,
+                options: newQuestion.options,
+                correctAnswer: newQuestion.correctAnswer,
+                explanation: newQuestion.explanation || "",
+                difficulty:
+                  newQuestion.difficulty || item.difficulty || "moderate",
+                excluded: false,
+              }
+            : item,
+        ),
+      }));
     } catch (error) {
-      console.error("REGENERATION ERROR:", error);
-
-      alert(
-        error.response?.data?.error ||
-          error.message ||
-          "Failed to regenerate this question.",
-      );
+      console.error(error);
+      alert(error.response?.data?.error || "Failed to regenerate question.");
     } finally {
       setRegeneratingQuestion(null);
     }
@@ -467,20 +433,35 @@ function App() {
   // PUBLISH QUIZ
   // =========================================================
 
-  const publishQuiz = () => {
+  const publishQuiz = async () => {
     const activeQuestions = getActiveQuestions();
 
     if (activeQuestions.length === 0) {
       alert("Please keep at least one question before publishing.");
-
       return;
     }
 
-    const newCode = generateQuizCode();
+    try {
+      const quizToPublish = {
+        ...quiz,
+        questions: activeQuestions,
+        totalQuestions: activeQuestions.length,
+        totalMarks: getCurrentTotalMarks(),
+      };
 
-    setQuizCode(newCode);
+      const response = await axios.post(
+        "https://advancequiz.onrender.com/publish-quiz",
+        {
+          quiz: quizToPublish,
+        },
+      );
 
-    setPublished(true);
+      setQuizCode(response.data.code);
+      setPublished(true);
+    } catch (error) {
+      console.error(error);
+      alert(error.response?.data?.error || "Failed to publish quiz.");
+    }
   };
 
   // =========================================================
@@ -488,35 +469,25 @@ function App() {
   // =========================================================
 
   const goHome = () => {
+    // General
     setRole(null);
 
-    setQuiz(null);
-
-    setQuizCode(null);
-
-    setPublished(false);
-
+    // Teacher
     setFile(null);
-
-    setDifficulty("moderate");
-
-    setCreationMode(null);
-
+    setQuiz(null);
+    setPublished(false);
+    setQuizCode("");
+    setManualQuestions([]);
     setRegeneratingQuestion(null);
 
-    setManualQuestions([]);
-
-    setManualQuestion("");
-
-    setManualOptions(["", "", "", ""]);
-
-    setManualCorrectAnswer(0);
-
-    setManualDifficulty("moderate");
-
-    setManualMarks(2);
-
-    setManualExplanation("");
+    // Student
+    setStudentQuiz(null);
+    setQuizStarted(false);
+    setCurrentQuestion(0);
+    setStudentAnswers({});
+    setStudentName("");
+    setEnrollment("");
+    setJoinCode("");
   };
 
   // =========================================================
@@ -1376,7 +1347,7 @@ function App() {
 
               try {
                 const response = await axios.get(
-                  `${process.env.REACT_APP_API_URL}/quiz/${joinCode}`,
+                  "https://advancequiz.onrender.com/quiz/${joinCode}",
                 );
 
                 console.log("Quiz loaded:", response.data);
