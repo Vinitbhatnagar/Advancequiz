@@ -48,6 +48,10 @@ function App() {
 
   const [manualQuestions, setManualQuestions] = useState([]);
 
+  const [studentQuiz, setStudentQuiz] = useState(null);
+  const [currentQuestion, setCurrentQuestion] = useState(0);
+  const [studentAnswers, setStudentAnswers] = useState({});
+  const [quizStarted, setQuizStarted] = useState(false);
   // =========================================================
   // STUDENT STATE
   // =========================================================
