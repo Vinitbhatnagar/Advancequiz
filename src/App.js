@@ -9,9 +9,6 @@ function App() {
   // =========================================================
   // TEACHER STATE
   // =========================================================
-  const API =
-    process.env.REACT_APP_API_URL || "https://advancequiz.onrender.com";
-
   const [file, setFile] = useState(null);
 
   const [numberOfQuestions, setNumberOfQuestions] = useState(10);
@@ -50,24 +47,18 @@ function App() {
 
   const [manualQuestions, setManualQuestions] = useState([]);
 
-  const [studentQuiz, setStudentQuiz] = useState(null);
-  const [currentQuestion, setCurrentQuestion] = useState(0);
-  const [studentAnswers, setStudentAnswers] = useState({});
-  const [quizStarted, setQuizStarted] = useState(false);
   // =========================================================
   // STUDENT STATE
   // =========================================================
 
-  const [studentName, setStudentName] = useState("");
-
-  const [enrollment, setEnrollment] = useState("");
-
-  const [joinCode, setJoinCode] = useState("");
-
   const [studentQuiz, setStudentQuiz] = useState(null);
-  const [quizStarted, setQuizStarted] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [studentAnswers, setStudentAnswers] = useState({});
+  const [quizStarted, setQuizStarted] = useState(false);
+
+  const [studentName, setStudentName] = useState("");
+  const [enrollment, setEnrollment] = useState("");
+  const [joinCode, setJoinCode] = useState("");
 
   useEffect(() => {
     const path = window.location.pathname;
@@ -1347,7 +1338,7 @@ function App() {
 
               try {
                 const response = await axios.get(
-                  "https://advancequiz.onrender.com/quiz/${joinCode}",
+                  `https://advancequiz.onrender.com/quiz/${joinCode}`,
                 );
 
                 console.log("Quiz loaded:", response.data);
