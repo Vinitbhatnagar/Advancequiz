@@ -408,18 +408,6 @@ function App() {
   // GENERATE QUIZ CODE
   // =========================================================
 
-  const generateQuizCode = () => {
-    const characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-    let code = "STX";
-
-    for (let i = 0; i < 6; i++) {
-      code += characters.charAt(Math.floor(Math.random() * characters.length));
-    }
-
-    return code;
-  };
-
   // =========================================================
   // PUBLISH QUIZ
   // =========================================================
