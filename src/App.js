@@ -48,6 +48,67 @@ function App() {
   const [manualQuestions, setManualQuestions] = useState([]);
 
   // =========================================================
+// STUDENT ANTI-COPY / PASTE PROTECTION
+// =========================================================
+useEffect(() => {
+  // Protection is active only during the actual quiz
+  if (role !== "student" || !quizStarted) {
+    return;
+  }
+
+  const preventCopyPaste = (e) => {
+    e.preventDefault();
+  };
+
+  const preventContextMenu = (e) => {
+    e.preventDefault();
+  };
+
+  const preventDrag = (e) => {
+    e.preventDefault();
+  };
+
+  const preventKeyboardShortcuts = (e) => {
+    const key = e.key.toLowerCase();
+
+    // Copy, paste, cut, select all
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      ["c", "v", "x", "a"].includes(key)
+    ) {
+      e.preventDefault();
+      return;
+    }
+
+    // F12 / DevTools shortcuts
+    if (
+      e.key === "F12" ||
+      (e.ctrlKey && e.shiftKey && ["i", "j", "c"].includes(key))
+    ) {
+      e.preventDefault();
+    }
+  };
+
+  document.addEventListener("copy", preventCopyPaste);
+  document.addEventListener("cut", preventCopyPaste);
+  document.addEventListener("paste", preventCopyPaste);
+  document.addEventListener("contextmenu", preventContextMenu);
+  document.addEventListener("dragstart", preventDrag);
+  document.addEventListener("keydown", preventKeyboardShortcuts);
+
+  // IMPORTANT:
+  // Remove the protection when the student leaves the quiz.
+  return () => {
+    document.removeEventListener("copy", preventCopyPaste);
+    document.removeEventListener("cut", preventCopyPaste);
+    document.removeEventListener("paste", preventCopyPaste);
+    document.removeEventListener("contextmenu", preventContextMenu);
+    document.removeEventListener("dragstart", preventDrag);
+    document.removeEventListener("keydown", preventKeyboardShortcuts);
+  };
+}, [role, quizStarted]);
+
+  // =========================================================
   // STUDENT STATE
   // =========================================================
 
@@ -72,6 +133,24 @@ function App() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!(role === "student" && quizStarted)) return;
+
+    const prevent = (e) => e.preventDefault();
+
+    document.addEventListener("contextmenu", prevent);
+    document.addEventListener("copy", prevent);
+    document.addEventListener("cut", prevent);
+    document.addEventListener("paste", prevent);
+
+    return () => {
+      document.removeEventListener("contextmenu", prevent);
+      document.removeEventListener("copy", prevent);
+      document.removeEventListener("cut", prevent);
+      document.removeEventListener("paste", prevent);
+    };
+  }, [role, quizStarted]);
   // =========================================================
   // GENERATE QUIZ WITH AI
   // =========================================================
@@ -1212,7 +1291,7 @@ function App() {
 
     return (
       <div className="app">
-        <div className="student-container">
+        <div className="student-container student-exam">
           <div className="student-card">
             <h1>{studentQuiz.title || "Advance's Quiz"}</h1>
 

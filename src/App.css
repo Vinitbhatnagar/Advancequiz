@@ -107,7 +107,7 @@ button:disabled {
   width: 9px;
 }
 
-::-webkit-scrollbar-track {
+  ::-webkit-scrollbar-track {
   background: #120621;
 }
 
@@ -1892,4 +1892,33 @@ h2 {
     flex: 1;
   }
 
+}
+
+.student-container,
+.student-card,
+.question-card,
+.option,
+.question-card * {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* =========================================================
+   STUDENT EXAM ANTI-COPY PROTECTION
+   ========================================================= */
+
+.student-exam,
+.student-exam * {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.student-exam img {
+  -webkit-user-drag: none;
+  user-drag: none;
 }
