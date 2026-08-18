@@ -60,6 +60,10 @@ function App() {
   const [enrollment, setEnrollment] = useState("");
   const [joinCode, setJoinCode] = useState("");
 
+  const [studentResult, setStudentResult] = useState(null);
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [submittingQuiz, setSubmittingQuiz] = useState(false);
+
   const submitQuiz = async (autoSubmit = false) => {
     if (!studentQuiz || submittingQuiz) {
       return;
@@ -109,6 +113,33 @@ function App() {
     ).padStart(2, "0")}`;
   };
 
+  useEffect(() => {
+    if (!quizStarted || !studentQuiz || studentResult) {
+      return;
+    }
+
+    if (timeLeft <= 0) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setTimeLeft((previous) => {
+        if (previous <= 1) {
+          clearInterval(timer);
+
+          // Auto submit when time expires
+          submitQuiz(true);
+
+          return 0;
+        }
+
+        return previous - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [quizStarted, studentQuiz, studentResult, timeLeft]);
+
   // =========================================================
   // LIVE STUDENT COUNT
   // =========================================================
@@ -144,33 +175,6 @@ function App() {
       clearInterval(interval);
     };
   }, [published, quizCode]);
-
-  useEffect(() => {
-    if (!quizStarted || !studentQuiz || studentResult) {
-      return;
-    }
-
-    if (timeLeft <= 0) {
-      return;
-    }
-
-    const timer = setInterval(() => {
-      setTimeLeft((previous) => {
-        if (previous <= 1) {
-          clearInterval(timer);
-
-          // Auto submit when time expires
-          submitQuiz(true);
-
-          return 0;
-        }
-
-        return previous - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [quizStarted, studentQuiz, studentResult, timeLeft]);
 
   useEffect(() => {
     const path = window.location.pathname;
