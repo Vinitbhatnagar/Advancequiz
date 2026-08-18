@@ -1249,6 +1249,177 @@ app.get("/quiz/:code/students", async (req, res) => {
 });
 
 // =========================================================
+// SUBMIT QUIZ
+// =========================================================
+
+app.post("/quiz/:code/submit", async (req, res) => {
+  try {
+    const code = req.params.code.toUpperCase();
+
+    const { enrollment, answers } = req.body;
+
+    if (!enrollment) {
+      return res.status(400).json({
+        success: false,
+        error: "Enrollment number is required.",
+      });
+    }
+
+    const cleanEnrollment = enrollment.trim().toUpperCase();
+
+    // -----------------------------------------------------
+    // GET QUIZ
+    // -----------------------------------------------------
+
+    const quizRef = db.collection("quizzes").doc(code);
+
+    const quizSnapshot = await quizRef.get();
+
+    if (!quizSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Quiz not found.",
+      });
+    }
+
+    const quiz = quizSnapshot.data();
+
+    // -----------------------------------------------------
+    // GET STUDENT
+    // -----------------------------------------------------
+
+    const studentRef = quizRef.collection("students").doc(cleanEnrollment);
+
+    const studentSnapshot = await studentRef.get();
+
+    if (!studentSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Student attempt not found.",
+      });
+    }
+
+    const student = studentSnapshot.data();
+
+    // -----------------------------------------------------
+    // PREVENT DOUBLE SUBMISSION
+    // -----------------------------------------------------
+
+    if (student.submitted === true) {
+      return res.status(409).json({
+        success: false,
+        error: "This quiz has already been submitted.",
+      });
+    }
+
+    // -----------------------------------------------------
+    // CALCULATE SCORE
+    // -----------------------------------------------------
+
+    const studentAnswers = answers || {};
+
+    let score = 0;
+
+    let totalMarks = 0;
+
+    const review = (quiz.questions || []).map((question, index) => {
+      const marks = Number(question.marks || 1);
+
+      totalMarks += marks;
+
+      const studentAnswer = studentAnswers[index];
+
+      const correctAnswer = Number(question.correctAnswer);
+
+      const isCorrect = Number(studentAnswer) === correctAnswer;
+
+      if (isCorrect) {
+        score += marks;
+      }
+
+      return {
+        question: question.question,
+
+        options: question.options,
+
+        studentAnswer:
+          studentAnswer === undefined ? null : Number(studentAnswer),
+
+        correctAnswer,
+
+        isCorrect,
+
+        marks,
+
+        explanation: question.explanation || "",
+      };
+    });
+
+    const percentage =
+      totalMarks > 0 ? Number(((score / totalMarks) * 100).toFixed(2)) : 0;
+
+    // -----------------------------------------------------
+    // SAVE RESULT
+    // -----------------------------------------------------
+
+    const submittedAt = new Date().toISOString();
+
+    await studentRef.update({
+      answers: studentAnswers,
+
+      submitted: true,
+
+      submittedAt,
+
+      status: "submitted",
+
+      score,
+
+      totalMarks,
+
+      percentage,
+    });
+
+    console.log(
+      `Quiz submitted: ${code} - ${cleanEnrollment} - ${score}/${totalMarks}`,
+    );
+
+    // -----------------------------------------------------
+    // RESPONSE
+    // -----------------------------------------------------
+
+    res.json({
+      success: true,
+
+      result: {
+        quizCode: code,
+
+        studentName: student.studentName,
+
+        enrollment: cleanEnrollment,
+
+        score,
+
+        totalMarks,
+
+        percentage,
+
+        submittedAt,
+
+        review,
+      },
+    });
+  } catch (error) {
+    console.error("SUBMIT QUIZ ERROR:", error);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to submit quiz.",
+    });
+  }
+});
+
+// =========================================================
 // LIVE STUDENT COUNT
 // =========================================================
 

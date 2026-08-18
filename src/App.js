@@ -54,10 +54,123 @@ function App() {
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [studentAnswers, setStudentAnswers] = useState({});
   const [quizStarted, setQuizStarted] = useState(false);
+  const [studentCount, setStudentCount] = useState(0);
 
   const [studentName, setStudentName] = useState("");
   const [enrollment, setEnrollment] = useState("");
   const [joinCode, setJoinCode] = useState("");
+
+  const submitQuiz = async (autoSubmit = false) => {
+    if (!studentQuiz || submittingQuiz) {
+      return;
+    }
+
+    const confirmed = autoSubmit
+      ? true
+      : window.confirm("Are you sure you want to submit the quiz?");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setSubmittingQuiz(true);
+
+    try {
+      const code = studentQuiz.code.toUpperCase();
+
+      const response = await axios.post(
+        `https://advancequiz.onrender.com/quiz/${code}/submit`,
+        {
+          enrollment: enrollment.trim().toUpperCase(),
+          answers: studentAnswers,
+        },
+      );
+
+      console.log("Quiz submitted:", response.data);
+
+      setStudentResult(response.data.result);
+
+      setQuizStarted(false);
+    } catch (error) {
+      console.error("SUBMIT QUIZ ERROR:", error);
+
+      alert(error.response?.data?.error || "Failed to submit quiz.");
+    } finally {
+      setSubmittingQuiz(false);
+    }
+  };
+  const formatTime = (seconds) => {
+    const minutes = Math.floor(seconds / 60);
+
+    const remainingSeconds = seconds % 60;
+
+    return `${String(minutes).padStart(2, "0")}:${String(
+      remainingSeconds,
+    ).padStart(2, "0")}`;
+  };
+
+  // =========================================================
+  // LIVE STUDENT COUNT
+  // =========================================================
+
+  useEffect(() => {
+    if (!published || !quizCode) {
+      return;
+    }
+
+    let interval;
+
+    const fetchStudentCount = async () => {
+      try {
+        const response = await axios.get(
+          `https://advancequiz.onrender.com/quiz/${quizCode}/student-count`,
+        );
+
+        if (response.data.success) {
+          setStudentCount(response.data.totalStudents || 0);
+        }
+      } catch (error) {
+        console.error("STUDENT COUNT ERROR:", error);
+      }
+    };
+
+    // Fetch immediately
+    fetchStudentCount();
+
+    // Then refresh every 3 seconds
+    interval = setInterval(fetchStudentCount, 3000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [published, quizCode]);
+
+  useEffect(() => {
+    if (!quizStarted || !studentQuiz || studentResult) {
+      return;
+    }
+
+    if (timeLeft <= 0) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setTimeLeft((previous) => {
+        if (previous <= 1) {
+          clearInterval(timer);
+
+          // Auto submit when time expires
+          submitQuiz(true);
+
+          return 0;
+        }
+
+        return previous - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [quizStarted, studentQuiz, studentResult, timeLeft]);
 
   useEffect(() => {
     const path = window.location.pathname;
@@ -90,6 +203,9 @@ function App() {
     };
   }, [role, quizStarted]);
 
+  const [studentResult, setStudentResult] = useState(null);
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [submittingQuiz, setSubmittingQuiz] = useState(false);
   // =========================================================
   // STUDENT ANTI-COPY / PASTE PROTECTION
   // =========================================================
@@ -1270,11 +1386,137 @@ function App() {
               <div className="live-info">
                 <span>● Quiz is Live</span>
 
-                <p>Waiting for students to join...</p>
+                <p>
+                  {studentCount === 0
+                    ? "Waiting for students to join..."
+                    : `${studentCount} student${
+                        studentCount === 1 ? "" : "s"
+                      } joined the quiz.`}
+                </p>
+              </div>
+
+              <div
+                className="quiz-summary"
+                style={{
+                  marginTop: "20px",
+                }}
+              >
+                <div>
+                  <span>Students Joined</span>
+
+                  <strong>{studentCount}</strong>
+                </div>
               </div>
             </div>
           )}
         </main>
+      </div>
+    );
+  }
+
+  if (role === "student" && studentResult) {
+    return (
+      <div className="app">
+        <div className="student-container">
+          <div className="student-card">
+            <div className="student-icon">🎉</div>
+
+            <span className="eyebrow">QUIZ COMPLETED</span>
+
+            <h1>Quiz Submitted Successfully</h1>
+
+            <p>
+              {studentName} • {enrollment}
+            </p>
+
+            {/* SCORE */}
+
+            <div
+              className="quiz-summary"
+              style={{
+                marginTop: "30px",
+              }}
+            >
+              <div>
+                <span>Score</span>
+
+                <strong>{studentResult.score}</strong>
+              </div>
+
+              <div>
+                <span>Total Marks</span>
+
+                <strong>{studentResult.totalMarks}</strong>
+              </div>
+
+              <div>
+                <span>Percentage</span>
+
+                <strong>{studentResult.percentage}%</strong>
+              </div>
+            </div>
+
+            {/* ANSWER REVIEW */}
+
+            <div
+              className="questions-list"
+              style={{
+                marginTop: "30px",
+              }}
+            >
+              <h2>Review Answers</h2>
+
+              {studentResult.review?.map((item, index) => (
+                <div className="question-card" key={index}>
+                  <h3>
+                    Q{index + 1}. {item.question}
+                  </h3>
+
+                  <div className="options">
+                    {item.options.map((option, optionIndex) => {
+                      const isCorrect = optionIndex === item.correctAnswer;
+
+                      const isSelected = optionIndex === item.studentAnswer;
+
+                      return (
+                        <div
+                          key={optionIndex}
+                          className={isCorrect ? "option correct" : "option"}
+                        >
+                          <span>{String.fromCharCode(65 + optionIndex)}</span>
+
+                          <span>{option}</span>
+
+                          {isCorrect && <b>✓ Correct Answer</b>}
+
+                          {isSelected && !isCorrect && <b>✕ Your Answer</b>}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {item.explanation && (
+                    <div className="explanation">
+                      <strong>Explanation</strong>
+
+                      <p>{item.explanation}</p>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <button
+              className="primary-button"
+              style={{
+                marginTop: "30px",
+              }}
+              onClick={goHome}
+            >
+              Back to Home
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1290,33 +1532,73 @@ function App() {
       <div className="app">
         <div className="student-container student-exam">
           <div className="student-card">
-            <h1>{studentQuiz.title || "Advance's Quiz"}</h1>
+            {/* HEADER */}
 
-            <p>
-              Question {currentQuestion + 1} of {studentQuiz.questions.length}
-            </p>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "20px",
+                marginBottom: "20px",
+              }}
+            >
+              <div>
+                <h1>{studentQuiz.title || "Advance's Quiz"}</h1>
+
+                <p>
+                  Question {currentQuestion + 1} of{" "}
+                  {studentQuiz.questions.length}
+                </p>
+              </div>
+
+              {/* TIMER */}
+
+              <div
+                style={{
+                  padding: "12px 18px",
+                  borderRadius: "12px",
+                  background: timeLeft <= 60 ? "#7f1d1d" : "#24103f",
+                  color: "#fff",
+                  fontWeight: 800,
+                  fontSize: "20px",
+                  minWidth: "100px",
+                  textAlign: "center",
+                }}
+              >
+                {formatTime(timeLeft)}
+              </div>
+            </div>
+
+            {/* QUESTION */}
 
             <div className="question-card">
               <h3>{q.question}</h3>
 
-              {q.options.map((option, index) => (
-                <label key={index} className="option">
-                  <input
-                    type="radio"
-                    name={`question-${currentQuestion}`}
-                    checked={studentAnswers[currentQuestion] === index}
-                    onChange={() =>
-                      setStudentAnswers({
-                        ...studentAnswers,
-                        [currentQuestion]: index,
-                      })
-                    }
-                  />
+              <div className="options">
+                {q.options.map((option, index) => (
+                  <label key={index} className="option">
+                    <input
+                      type="radio"
+                      name={`question-${currentQuestion}`}
+                      checked={studentAnswers[currentQuestion] === index}
+                      onChange={() =>
+                        setStudentAnswers((previous) => ({
+                          ...previous,
+                          [currentQuestion]: index,
+                        }))
+                      }
+                    />
 
-                  <span>{option}</span>
-                </label>
-              ))}
+                    <span>{String.fromCharCode(65 + index)}</span>
+
+                    <span>{option}</span>
+                  </label>
+                ))}
+              </div>
             </div>
+
+            {/* NAVIGATION */}
 
             <div className="question-actions">
               <button
@@ -1337,9 +1619,10 @@ function App() {
               ) : (
                 <button
                   className="primary-button"
-                  onClick={() => alert("Submit quiz coming next!")}
+                  disabled={submittingQuiz}
+                  onClick={() => submitQuiz(false)}
                 >
-                  Submit Quiz
+                  {submittingQuiz ? "Submitting..." : "Submit Quiz"}
                 </button>
               )}
             </div>
@@ -1395,24 +1678,82 @@ function App() {
           <button
             className="primary-button"
             onClick={async () => {
-              if (!studentName || !enrollment || !joinCode) {
+              if (
+                !studentName.trim() ||
+                !enrollment.trim() ||
+                !joinCode.trim()
+              ) {
                 alert("Please fill all fields.");
                 return;
               }
 
               try {
-                const response = await axios.get(
-                  `https://advancequiz.onrender.com/quiz/${joinCode}`,
+                const code = joinCode.trim().toUpperCase();
+
+                // --------------------------------------------------
+                // 1. START / JOIN QUIZ
+                // This performs duplicate enrollment protection
+                // --------------------------------------------------
+
+                const joinResponse = await axios.post(
+                  `https://advancequiz.onrender.com/quiz/${code}/join`,
+                  {
+                    studentName: studentName.trim(),
+                    enrollment: enrollment.trim().toUpperCase(),
+                  },
                 );
 
-                console.log("Quiz loaded:", response.data);
+                console.log("Quiz joined:", joinResponse.data);
 
-                const quiz = response.data.quiz;
+                // --------------------------------------------------
+                // 2. LOAD QUIZ QUESTIONS
+                // --------------------------------------------------
 
-                setStudentQuiz(quiz);
+                const quizResponse = await axios.get(
+                  `https://advancequiz.onrender.com/quiz/${code}`,
+                );
+
+                const loadedQuiz = quizResponse.data.quiz;
+
+                // --------------------------------------------------
+                // 3. SAVE QUIZ
+                // --------------------------------------------------
+
+                setStudentQuiz(loadedQuiz);
+
+                setStudentAnswers({});
+
+                setCurrentQuestion(0);
+
+                setStudentResult(null);
+
+                // --------------------------------------------------
+                // 4. START TIMER FROM SERVER
+                // --------------------------------------------------
+
+                const expiresAt = new Date(
+                  joinResponse.data.student.expiresAt,
+                ).getTime();
+
+                const remainingSeconds = Math.max(
+                  0,
+                  Math.floor((expiresAt - Date.now()) / 1000),
+                );
+
+                setTimeLeft(remainingSeconds);
+
                 setQuizStarted(true);
               } catch (error) {
-                alert("Quiz not found. Please check the code.");
+                console.error("JOIN QUIZ ERROR:", error);
+
+                if (error.response?.status === 409) {
+                  alert("This enrollment number has already joined this test.");
+                } else {
+                  alert(
+                    error.response?.data?.error ||
+                      "Unable to join quiz. Please check the quiz code.",
+                  );
+                }
               }
             }}
           >
