@@ -138,6 +138,7 @@ function App() {
     }, 1000);
 
     return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quizStarted, studentQuiz, studentResult, timeLeft]);
 
   // =========================================================
