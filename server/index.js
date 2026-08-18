@@ -1104,6 +1104,483 @@ app.post("/quiz/:code/join", async (req, res) => {
 });
 
 // =========================================================
+// SUBMIT QUIZ
+// =========================================================
+
+app.post("/quiz/:code/submit", async (req, res) => {
+  try {
+    const code = req.params.code.toUpperCase();
+
+    const { enrollment, answers = {} } = req.body;
+
+    // -----------------------------------------------------
+    // VALIDATE ENROLLMENT
+    // -----------------------------------------------------
+
+    if (!enrollment || !enrollment.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Enrollment number is required.",
+      });
+    }
+
+    const cleanEnrollment = enrollment.trim().toUpperCase();
+
+    // -----------------------------------------------------
+    // GET QUIZ
+    // -----------------------------------------------------
+
+    const quizRef = db.collection("quizzes").doc(code);
+
+    const quizSnapshot = await quizRef.get();
+
+    if (!quizSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Quiz not found.",
+      });
+    }
+
+    const quiz = quizSnapshot.data();
+
+    // -----------------------------------------------------
+    // GET STUDENT
+    // -----------------------------------------------------
+
+    const studentRef = quizRef.collection("students").doc(cleanEnrollment);
+
+    const studentSnapshot = await studentRef.get();
+
+    if (!studentSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Student has not joined this quiz.",
+      });
+    }
+
+    const student = studentSnapshot.data();
+
+    // -----------------------------------------------------
+    // CHECK ALREADY SUBMITTED
+    // -----------------------------------------------------
+
+    if (student.submitted === true) {
+      return res.status(409).json({
+        success: false,
+        error: "Quiz has already been submitted.",
+      });
+    }
+
+    // -----------------------------------------------------
+    // CHECK QUESTIONS
+    // -----------------------------------------------------
+
+    if (!Array.isArray(quiz.questions)) {
+      return res.status(500).json({
+        success: false,
+        error: "Quiz questions are missing.",
+      });
+    }
+
+    // -----------------------------------------------------
+    // CHECK TIMER
+    // -----------------------------------------------------
+
+    const now = new Date();
+
+    const expiresAt = student.expiresAt ? new Date(student.expiresAt) : null;
+
+    const isTimeExpired = expiresAt && now.getTime() >= expiresAt.getTime();
+
+    // -----------------------------------------------------
+    // CALCULATE SCORE
+    // -----------------------------------------------------
+
+    let score = 0;
+    let correctAnswers = 0;
+    let wrongAnswers = 0;
+    let unanswered = 0;
+
+    const processedAnswers = {};
+
+    quiz.questions.forEach((question, index) => {
+      const submittedAnswer = answers[index];
+
+      const hasAnswer =
+        submittedAnswer !== undefined &&
+        submittedAnswer !== null &&
+        submittedAnswer !== "";
+
+      const selectedAnswer = hasAnswer ? Number(submittedAnswer) : null;
+
+      const correctAnswer = Number(question.correctAnswer);
+
+      let isCorrect = false;
+
+      if (!hasAnswer) {
+        unanswered++;
+      } else if (
+        Number.isInteger(selectedAnswer) &&
+        selectedAnswer >= 0 &&
+        selectedAnswer <= 3
+      ) {
+        if (selectedAnswer === correctAnswer) {
+          isCorrect = true;
+
+          correctAnswers++;
+
+          score += Number(question.marks || 1);
+        } else {
+          wrongAnswers++;
+        }
+      } else {
+        unanswered++;
+      }
+
+      processedAnswers[index] = {
+        selectedAnswer,
+        correctAnswer,
+        isCorrect,
+        marks: isCorrect ? Number(question.marks || 1) : 0,
+      };
+    });
+
+    // -----------------------------------------------------
+    // TOTAL MARKS
+    // -----------------------------------------------------
+
+    const totalMarks =
+      Number(quiz.totalMarks) ||
+      quiz.questions.reduce(
+        (total, question) => total + Number(question.marks || 1),
+        0,
+      );
+
+    // -----------------------------------------------------
+    // PERCENTAGE
+    // -----------------------------------------------------
+
+    const percentage =
+      totalMarks > 0 ? Number(((score / totalMarks) * 100).toFixed(2)) : 0;
+
+    // -----------------------------------------------------
+    // SUBMISSION STATUS
+    // -----------------------------------------------------
+
+    const submissionStatus = isTimeExpired ? "auto_submitted" : "submitted";
+
+    const submittedAt = now.toISOString();
+
+    // -----------------------------------------------------
+    // SAVE RESULT
+    // -----------------------------------------------------
+
+    await studentRef.update({
+      answers: processedAnswers,
+
+      score,
+
+      totalMarks,
+
+      percentage,
+
+      correctAnswers,
+
+      wrongAnswers,
+
+      unanswered,
+
+      submitted: true,
+
+      submittedAt,
+
+      status: submissionStatus,
+    });
+
+    console.log(`Quiz submitted: ${code} - ${cleanEnrollment}`);
+
+    console.log(`Score: ${score}/${totalMarks} (${percentage}%)`);
+
+    // -----------------------------------------------------
+    // RESPONSE
+    // -----------------------------------------------------
+
+    res.json({
+      success: true,
+
+      message: isTimeExpired
+        ? "Time expired. Quiz was automatically submitted."
+        : "Quiz submitted successfully.",
+
+      quizCode: code,
+
+      enrollment: cleanEnrollment,
+
+      score,
+
+      totalMarks,
+
+      percentage,
+
+      correctAnswers,
+
+      wrongAnswers,
+
+      unanswered,
+
+      submittedAt,
+
+      status: submissionStatus,
+    });
+  } catch (error) {
+    console.error("SUBMIT QUIZ ERROR:", error);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to submit quiz.",
+    });
+  }
+});
+
+// =========================================================
+// VIEW QUIZ RESULT / SCORE
+// =========================================================
+
+app.get("/quiz/:code/result/:enrollment", async (req, res) => {
+  try {
+    const code = req.params.code.toUpperCase();
+
+    const enrollment = req.params.enrollment.trim().toUpperCase();
+
+    // -----------------------------------------------------
+    // GET QUIZ
+    // -----------------------------------------------------
+
+    const quizRef = db.collection("quizzes").doc(code);
+
+    const quizSnapshot = await quizRef.get();
+
+    if (!quizSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Quiz not found.",
+      });
+    }
+
+    const quiz = quizSnapshot.data();
+
+    // -----------------------------------------------------
+    // GET STUDENT
+    // -----------------------------------------------------
+
+    const studentRef = quizRef.collection("students").doc(enrollment);
+
+    const studentSnapshot = await studentRef.get();
+
+    if (!studentSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Student result not found.",
+      });
+    }
+
+    const student = studentSnapshot.data();
+
+    // -----------------------------------------------------
+    // CHECK SUBMISSION
+    // -----------------------------------------------------
+
+    if (!student.submitted) {
+      return res.status(400).json({
+        success: false,
+        error: "Quiz has not been submitted yet.",
+      });
+    }
+
+    // -----------------------------------------------------
+    // RESPONSE
+    // -----------------------------------------------------
+
+    res.json({
+      success: true,
+
+      result: {
+        quizCode: code,
+
+        studentName: student.studentName,
+
+        enrollment: student.enrollment,
+
+        score: Number(student.score || 0),
+
+        totalMarks: Number(student.totalMarks || 0),
+
+        percentage: Number(student.percentage || 0),
+
+        correctAnswers: Number(student.correctAnswers || 0),
+
+        wrongAnswers: Number(student.wrongAnswers || 0),
+
+        unanswered: Number(student.unanswered || 0),
+
+        submittedAt: student.submittedAt,
+
+        status: student.status,
+
+        totalQuestions: Array.isArray(quiz.questions)
+          ? quiz.questions.length
+          : 0,
+      },
+    });
+  } catch (error) {
+    console.error("GET RESULT ERROR:", error);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to load result.",
+    });
+  }
+});
+
+// =========================================================
+// REVIEW QUIZ ANSWERS
+// =========================================================
+
+app.get("/quiz/:code/review/:enrollment", async (req, res) => {
+  try {
+    const code = req.params.code.toUpperCase();
+
+    const enrollment = req.params.enrollment.trim().toUpperCase();
+
+    // -----------------------------------------------------
+    // GET QUIZ
+    // -----------------------------------------------------
+
+    const quizRef = db.collection("quizzes").doc(code);
+
+    const quizSnapshot = await quizRef.get();
+
+    if (!quizSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Quiz not found.",
+      });
+    }
+
+    const quiz = quizSnapshot.data();
+
+    // -----------------------------------------------------
+    // GET STUDENT
+    // -----------------------------------------------------
+
+    const studentRef = quizRef.collection("students").doc(enrollment);
+
+    const studentSnapshot = await studentRef.get();
+
+    if (!studentSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Student not found.",
+      });
+    }
+
+    const student = studentSnapshot.data();
+
+    // -----------------------------------------------------
+    // CHECK SUBMISSION
+    // -----------------------------------------------------
+
+    if (!student.submitted) {
+      return res.status(403).json({
+        success: false,
+        error: "Answer review is available only after submission.",
+      });
+    }
+
+    // -----------------------------------------------------
+    // BUILD REVIEW
+    // -----------------------------------------------------
+
+    const savedAnswers = student.answers || {};
+
+    const review = (quiz.questions || []).map((question, index) => {
+      const answerData = savedAnswers[index] || {};
+
+      const selectedAnswer =
+        answerData.selectedAnswer !== undefined
+          ? answerData.selectedAnswer
+          : null;
+
+      const correctAnswer = Number(question.correctAnswer);
+
+      const isCorrect =
+        selectedAnswer !== null && Number(selectedAnswer) === correctAnswer;
+
+      return {
+        questionNumber: index + 1,
+
+        question: question.question,
+
+        options: question.options,
+
+        selectedAnswer,
+
+        correctAnswer,
+
+        isCorrect,
+
+        marks: Number(question.marks || 1),
+
+        marksObtained: isCorrect ? Number(question.marks || 1) : 0,
+
+        explanation: question.explanation || "",
+
+        difficulty: question.difficulty || "",
+      };
+    });
+
+    // -----------------------------------------------------
+    // RESPONSE
+    // -----------------------------------------------------
+
+    res.json({
+      success: true,
+
+      quizCode: code,
+
+      student: {
+        studentName: student.studentName,
+
+        enrollment: student.enrollment,
+      },
+
+      result: {
+        score: Number(student.score || 0),
+
+        totalMarks: Number(student.totalMarks || 0),
+
+        percentage: Number(student.percentage || 0),
+
+        correctAnswers: Number(student.correctAnswers || 0),
+
+        wrongAnswers: Number(student.wrongAnswers || 0),
+
+        unanswered: Number(student.unanswered || 0),
+      },
+
+      review,
+    });
+  } catch (error) {
+    console.error("REVIEW ANSWERS ERROR:", error);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to load answer review.",
+    });
+  }
+});
+
+// =========================================================
 // GET STUDENTS OF QUIZ
 // =========================================================
 //
