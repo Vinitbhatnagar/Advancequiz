@@ -5,49 +5,26 @@ const fs = require("fs");
 const pdf = require("pdf-parse");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-const { initializeApp, cert, getApps } = require("firebase-admin/app");
+const { initializeApp, cert } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 
 require("dotenv").config();
 
 // =========================================================
-// ENVIRONMENT
-// =========================================================
-
-const requiredEnv = [
-  "FIREBASE_PROJECT_ID",
-  "FIREBASE_CLIENT_EMAIL",
-  "FIREBASE_PRIVATE_KEY",
-  "GEMINI_API_KEY",
-];
-
-const missingEnv = requiredEnv.filter((key) => !process.env[key]);
-
-if (missingEnv.length > 0) {
-  console.error("❌ Missing required environment variables:");
-  console.error(missingEnv.join(", "));
-  process.exit(1);
-}
-
-// =========================================================
 // FIREBASE
 // =========================================================
 
-if (!getApps().length) {
-  initializeApp({
-    credential: cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    }),
-  });
-}
+initializeApp({
+  credential: cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  }),
+});
 
 const db = getFirestore();
 
-console.log("✅ Firebase Admin initialized successfully.");
+console.log("Firebase Admin initialized successfully.");
 
 // =========================================================
 // EXPRESS
@@ -56,19 +33,10 @@ console.log("✅ Firebase Admin initialized successfully.");
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json());
 
 // =========================================================
 // TEMPORARY PDF CONTEXT
-// =========================================================
-//
-// Used only for regenerating a question after generating
-// a quiz.
-//
-// NOTE:
-// This is server memory and is therefore suitable for the
-// MVP/test. For production, store the source material
-// securely per quiz.
 // =========================================================
 
 let lastPdfText = "";
@@ -90,11 +58,7 @@ const upload = multer({
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-function getGeminiModel() {
-  return genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
-  });
-}
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 // =========================================================
 // HELPERS
@@ -108,40 +72,13 @@ function cleanGeminiResponse(text) {
       .replace(/^```json/, "")
       .replace(/```$/, "")
       .trim();
-  } else if (cleaned.startsWith("```")) {
+  }
+
+  if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```/, "").replace(/```$/, "").trim();
   }
 
   return cleaned;
-}
-
-function parseGeminiJSON(text) {
-  const cleaned = cleanGeminiResponse(text);
-
-  try {
-    return JSON.parse(cleaned);
-  } catch (error) {
-    console.error("❌ Invalid Gemini JSON:");
-    console.error(text);
-
-    throw new Error("AI returned an invalid JSON format.");
-  }
-}
-
-function validateQuestion(question) {
-  return (
-    question &&
-    typeof question.question === "string" &&
-    question.question.trim().length > 0 &&
-    Array.isArray(question.options) &&
-    question.options.length === 4 &&
-    question.options.every(
-      (option) => typeof option === "string" && option.trim().length > 0,
-    ) &&
-    Number.isInteger(question.correctAnswer) &&
-    question.correctAnswer >= 0 &&
-    question.correctAnswer <= 3
-  );
 }
 
 function generateQuizCode() {
@@ -168,20 +105,14 @@ function normalizeEnrollment(enrollment) {
     .toUpperCase();
 }
 
-function normalizeStudentName(studentName) {
-  return String(studentName || "").trim();
-}
-
 // =========================================================
-// HOME / HEALTH CHECK
+// HOME
 // =========================================================
 
 app.get("/", (req, res) => {
   res.json({
     success: true,
     message: "Advance's Quiz Backend Running!",
-    firebase: true,
-    timestamp: new Date().toISOString(),
   });
 });
 
@@ -193,10 +124,6 @@ app.post("/generate-quiz", upload.single("pdf"), async (req, res) => {
   let filePath = null;
 
   try {
-    // -----------------------------------------------------
-    // CHECK PDF
-    // -----------------------------------------------------
-
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -206,10 +133,6 @@ app.post("/generate-quiz", upload.single("pdf"), async (req, res) => {
 
     filePath = req.file.path;
 
-    // -----------------------------------------------------
-    // SETTINGS
-    // -----------------------------------------------------
-
     const numberOfQuestions = Number(req.body.numberOfQuestions) || 5;
 
     const marksPerQuestion = Number(req.body.marksPerQuestion) || 1;
@@ -218,16 +141,14 @@ app.post("/generate-quiz", upload.single("pdf"), async (req, res) => {
 
     const timeLimit = Number(req.body.timeLimit) || 30;
 
-    console.log("==========================================");
-    console.log("📄 PDF received:", req.file.originalname);
-    console.log("❓ Questions:", numberOfQuestions);
-    console.log("⭐ Marks/question:", marksPerQuestion);
-    console.log("🎯 Difficulty:", difficulty);
-    console.log("⏱️ Time limit:", timeLimit, "minutes");
-    console.log("==========================================");
+    console.log("PDF received:", req.file.originalname);
+    console.log("Questions:", numberOfQuestions);
+    console.log("Marks:", marksPerQuestion);
+    console.log("Difficulty:", difficulty);
+    console.log("Time:", timeLimit);
 
     // -----------------------------------------------------
-    // READ PDF
+    // EXTRACT PDF
     // -----------------------------------------------------
 
     const dataBuffer = fs.readFileSync(filePath);
@@ -242,19 +163,18 @@ app.post("/generate-quiz", upload.single("pdf"), async (req, res) => {
       );
     }
 
-    console.log("📚 Extracted characters:", extractedText.length);
+    console.log("Extracted characters:", extractedText.length);
 
-    // -----------------------------------------------------
-    // SAVE PDF CONTEXT
-    // -----------------------------------------------------
-
+    // Keep context for regeneration.
     lastPdfText = extractedText.slice(0, 60000);
 
     // -----------------------------------------------------
     // GEMINI
     // -----------------------------------------------------
 
-    const model = getGeminiModel();
+    const model = genAI.getGenerativeModel({
+      model: GEMINI_MODEL,
+    });
 
     // -----------------------------------------------------
     // PROMPT
@@ -286,23 +206,24 @@ HARD:
 - Application
 - Challenging but fair
 
-Each question must:
+Rules:
 
-1. Be based ONLY on the provided PDF content.
-2. Be appropriate for college students.
-3. Have exactly 4 options.
-4. Have exactly ONE correct answer.
+1. Questions must be based ONLY on the provided PDF.
+2. Create exactly ${numberOfQuestions} questions.
+3. Every question must have exactly 4 options.
+4. Only ONE option may be correct.
 5. Avoid duplicate questions.
 6. Avoid ambiguous questions.
-7. Avoid questions where multiple options could reasonably be correct.
-8. Make incorrect options plausible.
-9. Do not invent facts that are not supported by the PDF.
-10. Return ONLY valid JSON.
+7. Incorrect options must be plausible.
+8. Do not invent facts.
+9. Return ONLY valid JSON.
+10. Do not use markdown.
+11. Do not use code fences.
 
 Marks per question:
 ${marksPerQuestion}
 
-Return exactly this structure:
+Return exactly:
 
 {
   "questions": [
@@ -315,79 +236,74 @@ Return exactly this structure:
         "Option D"
       ],
       "correctAnswer": 0,
-      "explanation": "Short explanation of why the answer is correct"
+      "explanation": "Short explanation"
     }
   ]
 }
 
-IMPORTANT:
-
-- correctAnswer must be 0, 1, 2, or 3.
-- 0 = Option A.
-- 1 = Option B.
-- 2 = Option C.
-- 3 = Option D.
-- Do not include markdown.
-- Do not include code fences.
-- Return JSON only.
+correctAnswer:
+0 = Option A
+1 = Option B
+2 = Option C
+3 = Option D
 
 STUDY MATERIAL:
 
 ${lastPdfText}
 `;
 
-    console.log("🤖 Generating questions with Gemini...");
+    console.log("Generating questions with Gemini...");
 
     const result = await model.generateContent(prompt);
 
     const responseText = result.response.text();
 
-    console.log("✅ Gemini response received.");
+    const cleanedResponse = cleanGeminiResponse(responseText);
 
-    // -----------------------------------------------------
-    // PARSE JSON
-    // -----------------------------------------------------
+    let quizData;
 
-    const quizData = parseGeminiJSON(responseText);
+    try {
+      quizData = JSON.parse(cleanedResponse);
+    } catch (error) {
+      console.error("Invalid Gemini JSON:");
+      console.error(responseText);
 
-    // -----------------------------------------------------
-    // VALIDATE QUESTIONS ARRAY
-    // -----------------------------------------------------
-
-    if (!quizData || !Array.isArray(quizData.questions)) {
-      throw new Error("AI did not return a valid question list.");
+      throw new Error("AI returned an invalid quiz format. Please try again.");
     }
 
     // -----------------------------------------------------
-    // VALIDATE QUESTIONS
+    // VALIDATE
     // -----------------------------------------------------
+
+    if (!quizData.questions || !Array.isArray(quizData.questions)) {
+      throw new Error("AI did not return a valid question list.");
+    }
 
     const validQuestions = quizData.questions
       .slice(0, numberOfQuestions)
-      .filter(validateQuestion)
+      .filter((question) => {
+        return (
+          question.question &&
+          Array.isArray(question.options) &&
+          question.options.length === 4 &&
+          Number.isInteger(question.correctAnswer) &&
+          question.correctAnswer >= 0 &&
+          question.correctAnswer <= 3
+        );
+      })
       .map((question) => ({
-        question: question.question.trim(),
-
-        options: question.options.map((option) => option.trim()),
-
+        question: question.question,
+        options: question.options,
         correctAnswer: question.correctAnswer,
-
-        explanation:
-          typeof question.explanation === "string"
-            ? question.explanation.trim()
-            : "",
-
+        explanation: question.explanation || "",
         marks: marksPerQuestion,
-
         difficulty,
       }));
 
-    // -----------------------------------------------------
-    // CHECK RESULT
-    // -----------------------------------------------------
-
-    if (validQuestions.length === 0) {
-      throw new Error("No valid questions were generated.");
+    if (validQuestions.length !== numberOfQuestions) {
+      throw new Error(
+        `AI generated ${validQuestions.length} valid questions instead of ${numberOfQuestions}.`,
+      );
     }
 
     // -----------------------------------------------------
@@ -410,25 +326,15 @@ ${lastPdfText}
       questions: validQuestions,
     });
   } catch (error) {
-    console.error("❌ GENERATE QUIZ ERROR:");
-    console.error(error);
+    console.error("GENERATE QUIZ ERROR:", error);
 
     res.status(500).json({
       success: false,
-
       error: error.message || "Something went wrong while generating the quiz.",
     });
   } finally {
-    // -----------------------------------------------------
-    // DELETE TEMPORARY PDF
-    // -----------------------------------------------------
-
     if (filePath && fs.existsSync(filePath)) {
-      try {
-        fs.unlinkSync(filePath);
-      } catch (cleanupError) {
-        console.error("⚠️ Failed to delete temporary PDF:", cleanupError);
-      }
+      fs.unlinkSync(filePath);
     }
   }
 });
@@ -439,80 +345,50 @@ ${lastPdfText}
 
 app.post("/regenerate-question", async (req, res) => {
   try {
-    // -----------------------------------------------------
-    // CHECK PDF CONTEXT
-    // -----------------------------------------------------
-
     if (!lastPdfText) {
       return res.status(400).json({
         success: false,
-
         error: "PDF context not found. Please generate the quiz again.",
       });
     }
 
-    const selectedDifficulty = req.body.difficulty || "moderate";
+    const { difficulty, previousQuestion } = req.body;
 
-    const previousQuestion = req.body.previousQuestion || "None";
+    const selectedDifficulty = difficulty || "moderate";
 
-    // -----------------------------------------------------
-    // GEMINI
-    // -----------------------------------------------------
-
-    const model = getGeminiModel();
-
-    // -----------------------------------------------------
-    // PROMPT
-    // -----------------------------------------------------
+    const model = genAI.getGenerativeModel({
+      model: GEMINI_MODEL,
+    });
 
     const prompt = `
 You are an expert college examination question generator.
 
 Generate EXACTLY ONE new multiple-choice question.
 
-The question MUST be based ONLY on the provided PDF study material.
+The question MUST be based ONLY on the provided PDF.
 
 DIFFICULTY:
 ${selectedDifficulty}
 
-Difficulty rules:
-
-EASY:
-- Basic concepts
-- Direct recall
-- Simple understanding
-
-MODERATE:
-- Conceptual understanding
-- Application
-- Some reasoning
-
-HARD:
-- Deep conceptual understanding
-- Analysis
-- Application
-- Challenging but fair
-
-IMPORTANT:
+Rules:
 
 1. Generate exactly ONE question.
 2. Generate exactly FOUR options.
 3. Only ONE option can be correct.
-4. The question must be based ONLY on the PDF.
-5. Do NOT repeat the previous question.
-6. Do NOT create a minor rewording of the previous question.
-7. Make incorrect options plausible.
-8. Avoid ambiguous questions.
-9. Do not invent information.
-10. Return ONLY valid JSON.
-11. Do not include markdown.
-12. Do not include code fences.
+4. Do not repeat the previous question.
+5. Do not make a minor rewording of it.
+6. Make incorrect options plausible.
+7. Avoid ambiguity.
+8. Do not invent information.
+9. Return ONLY JSON.
+10. No markdown.
+11. No code fences.
 
 PREVIOUS QUESTION:
 
-${previousQuestion}
+${previousQuestion || "None"}
 
-Return exactly this structure:
+Return:
 
 {
   "question": "Question text",
@@ -526,71 +402,56 @@ Return exactly this structure:
   "explanation": "Short explanation"
 }
 
-correctAnswer rules:
-
-0 = Option A
-1 = Option B
-2 = Option C
-3 = Option D
-
-PDF STUDY MATERIAL:
+PDF:
 
 ${lastPdfText}
 `;
 
-    console.log("🔄 Regenerating question...");
-    console.log("🎯 Difficulty:", selectedDifficulty);
+    console.log("Regenerating question...");
 
     const result = await model.generateContent(prompt);
 
-    const responseText = result.response.text();
+    const cleanedResponse = cleanGeminiResponse(result.response.text());
 
-    console.log("✅ Gemini regeneration response received.");
+    let newQuestion;
 
-    // -----------------------------------------------------
-    // PARSE
-    // -----------------------------------------------------
-
-    const newQuestion = parseGeminiJSON(responseText);
-
-    // -----------------------------------------------------
-    // VALIDATE
-    // -----------------------------------------------------
-
-    if (!validateQuestion(newQuestion)) {
-      throw new Error("AI returned an invalid question.");
+    try {
+      newQuestion = JSON.parse(cleanedResponse);
+    } catch (error) {
+      throw new Error("AI returned an invalid question format.");
     }
 
-    // -----------------------------------------------------
-    // RESPONSE
-    // -----------------------------------------------------
+    if (
+      !newQuestion.question ||
+      !Array.isArray(newQuestion.options) ||
+      newQuestion.options.length !== 4 ||
+      !Number.isInteger(newQuestion.correctAnswer) ||
+      newQuestion.correctAnswer < 0 ||
+      newQuestion.correctAnswer > 3
+    ) {
+      throw new Error("AI returned an invalid question.");
+    }
 
     res.json({
       success: true,
 
       question: {
-        question: newQuestion.question.trim(),
+        question: newQuestion.question,
 
-        options: newQuestion.options.map((option) => option.trim()),
+        options: newQuestion.options,
 
         correctAnswer: newQuestion.correctAnswer,
 
-        explanation:
-          typeof newQuestion.explanation === "string"
-            ? newQuestion.explanation.trim()
-            : "",
+        explanation: newQuestion.explanation || "",
 
         difficulty: selectedDifficulty,
       },
     });
   } catch (error) {
-    console.error("❌ REGENERATE QUESTION ERROR:");
-
-    console.error(error);
+    console.error("REGENERATE QUESTION ERROR:", error);
 
     res.status(500).json({
       success: false,
-
       error: error.message || "Failed to regenerate question.",
     });
   }
@@ -604,15 +465,7 @@ app.post("/publish-quiz", async (req, res) => {
   try {
     const { quiz } = req.body;
 
-    // -----------------------------------------------------
-    // VALIDATE QUIZ
-    // -----------------------------------------------------
-
-    if (
-      !quiz ||
-      !Array.isArray(quiz.questions) ||
-      quiz.questions.length === 0
-    ) {
+    if (!quiz || !quiz.questions || !Array.isArray(quiz.questions)) {
       return res.status(400).json({
         success: false,
         error: "Invalid quiz data.",
@@ -620,7 +473,7 @@ app.post("/publish-quiz", async (req, res) => {
     }
 
     // -----------------------------------------------------
-    // GENERATE UNIQUE CODE
+    // UNIQUE CODE
     // -----------------------------------------------------
 
     let code;
@@ -636,7 +489,7 @@ app.post("/publish-quiz", async (req, res) => {
     } while (quizSnapshot.exists);
 
     // -----------------------------------------------------
-    // SETTINGS
+    // QUIZ DATA
     // -----------------------------------------------------
 
     const timeLimit = Number(quiz.timeLimit) || 30;
@@ -647,10 +500,6 @@ app.post("/publish-quiz", async (req, res) => {
 
     const totalMarks =
       Number(quiz.totalMarks) || totalQuestions * marksPerQuestion;
-
-    // -----------------------------------------------------
-    // QUIZ DATA
-    // -----------------------------------------------------
 
     const quizData = {
       ...quiz,
@@ -678,19 +527,7 @@ app.post("/publish-quiz", async (req, res) => {
 
     await quizRef.set(quizData);
 
-    console.log("==========================================");
-
-    console.log("✅ Quiz published to Firestore:", code);
-
-    console.log("Questions:", totalQuestions);
-
-    console.log("Time:", timeLimit, "minutes");
-
-    console.log("==========================================");
-
-    // -----------------------------------------------------
-    // RESPONSE
-    // -----------------------------------------------------
+    console.log("Quiz published:", code);
 
     res.json({
       success: true,
@@ -700,40 +537,25 @@ app.post("/publish-quiz", async (req, res) => {
       quiz: quizData,
     });
   } catch (error) {
-    console.error("❌ PUBLISH QUIZ ERROR:");
-    console.error(error);
+    console.error("PUBLISH QUIZ ERROR:", error);
 
     res.status(500).json({
       success: false,
-
-      error: error.message || "Failed to publish quiz.",
+      error: "Failed to publish quiz.",
     });
   }
 });
 
 // =========================================================
 // GET QUIZ BY CODE
-// =========================================================
-//
-// IMPORTANT:
-// Correct answers are NEVER sent to students.
+// STUDENT-SAFE VERSION
+// NEVER SENDS correctAnswer
 // =========================================================
 
 app.get("/quiz/:code", async (req, res) => {
   try {
     const code = normalizeCode(req.params.code);
 
-    if (!code) {
-      return res.status(400).json({
-        success: false,
-        error: "Quiz code is required.",
-      });
-    }
-
-    // -----------------------------------------------------
-    // GET QUIZ
-    // -----------------------------------------------------
-
     const quizRef = db.collection("quizzes").doc(code);
 
     const quizSnapshot = await quizRef.get();
@@ -741,250 +563,145 @@ app.get("/quiz/:code", async (req, res) => {
     if (!quizSnapshot.exists) {
       return res.status(404).json({
         success: false,
-
         error: "Quiz not found or no longer available.",
       });
     }
 
     const quiz = quizSnapshot.data();
 
-    // -----------------------------------------------------
-    // CHECK STATUS
-    // -----------------------------------------------------
+    const safeQuestions = (quiz.questions || []).map((question) => ({
+      question: question.question,
 
-    if (quiz.status && quiz.status !== "live") {
-      return res.status(403).json({
-        success: false,
+      options: question.options,
 
-        error: "This quiz is no longer available.",
-      });
-    }
+      marks: question.marks,
 
-    // -----------------------------------------------------
-    // REMOVE ANSWER KEY
-    // -----------------------------------------------------
-
-    const safeQuestions = Array.isArray(quiz.questions)
-      ? quiz.questions.map((question) => ({
-          question: question.question,
-
-          options: question.options,
-
-          marks: question.marks,
-
-          difficulty: question.difficulty,
-        }))
-      : [];
-
-    // -----------------------------------------------------
-    // STUDENT-SAFE QUIZ
-    // -----------------------------------------------------
-
-    const safeQuiz = {
-      code: quiz.code,
-
-      status: quiz.status,
-
-      createdAt: quiz.createdAt,
-
-      timeLimit: quiz.timeLimit,
-
-      totalQuestions: quiz.totalQuestions || safeQuestions.length,
-
-      marksPerQuestion: quiz.marksPerQuestion,
-
-      totalMarks: quiz.totalMarks,
-
-      totalStudents: quiz.totalStudents || 0,
-
-      questions: safeQuestions,
-    };
+      difficulty: question.difficulty,
+    }));
 
     res.json({
       success: true,
 
-      quiz: safeQuiz,
+      quiz: {
+        code: quiz.code,
+
+        status: quiz.status,
+
+        createdAt: quiz.createdAt,
+
+        timeLimit: quiz.timeLimit,
+
+        totalQuestions: quiz.totalQuestions,
+
+        marksPerQuestion: quiz.marksPerQuestion,
+
+        totalMarks: quiz.totalMarks,
+
+        totalStudents: quiz.totalStudents || 0,
+
+        questions: safeQuestions,
+      },
     });
   } catch (error) {
-    console.error("❌ GET QUIZ ERROR:", error);
+    console.error("GET QUIZ ERROR:", error);
 
     res.status(500).json({
       success: false,
-
       error: "Failed to load quiz.",
     });
   }
 });
 
 // =========================================================
-// STUDENT JOIN QUIZ + START ATTEMPT
-// =========================================================
-//
-// ONE JOIN ROUTE ONLY.
-//
-// Firestore document:
-//
-// quizzes/{CODE}/students/{ENROLLMENT}
-//
-// Therefore:
-//
-// Same quiz + same enrollment
-// = duplicate
-//
-// Different quiz + same enrollment
-// = allowed
-//
+// STUDENT JOIN QUIZ
+// DUPLICATE PROTECTION + TIMER START
 // =========================================================
 
 app.post("/quiz/:code/join", async (req, res) => {
   try {
     const code = normalizeCode(req.params.code);
 
-    const studentName = normalizeStudentName(req.body.studentName);
-
-    const enrollment = normalizeEnrollment(req.body.enrollment);
+    const { studentName, enrollment } = req.body;
 
     // -----------------------------------------------------
-    // VALIDATE CODE
+    // VALIDATION
     // -----------------------------------------------------
 
-    if (!code) {
-      return res.status(400).json({
-        success: false,
-        error: "Quiz code is required.",
-      });
-    }
-
-    // -----------------------------------------------------
-    // VALIDATE NAME
-    // -----------------------------------------------------
-
-    if (!studentName) {
+    if (!studentName || !studentName.trim()) {
       return res.status(400).json({
         success: false,
         error: "Student name is required.",
       });
     }
 
-    // -----------------------------------------------------
-    // VALIDATE ENROLLMENT
-    // -----------------------------------------------------
-
-    if (!enrollment) {
+    if (!enrollment || !enrollment.trim()) {
       return res.status(400).json({
         success: false,
         error: "Enrollment number is required.",
       });
     }
 
+    const cleanName = studentName.trim();
+
+    const cleanEnrollment = normalizeEnrollment(enrollment);
+
     // -----------------------------------------------------
-    // QUIZ REFERENCE
+    // QUIZ
     // -----------------------------------------------------
 
     const quizRef = db.collection("quizzes").doc(code);
-
-    // -----------------------------------------------------
-    // GET QUIZ
-    // -----------------------------------------------------
 
     const quizSnapshot = await quizRef.get();
 
     if (!quizSnapshot.exists) {
       return res.status(404).json({
         success: false,
-
         error: "Quiz not found or no longer available.",
       });
     }
 
     const quiz = quizSnapshot.data();
 
-    // -----------------------------------------------------
-    // CHECK STATUS
-    // -----------------------------------------------------
-
     if (quiz.status && quiz.status !== "live") {
       return res.status(403).json({
         success: false,
-
         error: "This quiz is no longer accepting students.",
       });
     }
 
     // -----------------------------------------------------
-    // TIMER
-    // -----------------------------------------------------
-
-    const timeLimit = Number(quiz.timeLimit) || 30;
-
-    // -----------------------------------------------------
     // STUDENT DOCUMENT
     // -----------------------------------------------------
-    //
-    // The enrollment number is the document ID.
-    //
-    // quizzes
-    //   STXABC123
-    //      students
-    //         BCA001
-    //
-    // -----------------------------------------------------
 
-    const studentRef = quizRef.collection("students").doc(enrollment);
+    const studentRef = quizRef.collection("students").doc(cleanEnrollment);
 
     // -----------------------------------------------------
     // TRANSACTION
     // -----------------------------------------------------
-    //
-    // This is important.
-    //
-    // A normal "check then create" can still allow
-    // duplicates if two requests arrive simultaneously.
-    //
-    // Firestore transaction prevents that race.
-    // -----------------------------------------------------
 
     const result = await db.runTransaction(async (transaction) => {
-      const studentSnapshot = await transaction.get(studentRef);
+      const existing = await transaction.get(studentRef);
 
-      // ------------------------------------------------
-      // DUPLICATE
-      // ------------------------------------------------
-
-      if (studentSnapshot.exists) {
-        const duplicateError = new Error("DUPLICATE_ENROLLMENT");
-
-        duplicateError.code = "DUPLICATE_ENROLLMENT";
-
-        throw duplicateError;
+      if (existing.exists) {
+        throw new Error("DUPLICATE_ENROLLMENT");
       }
-
-      // ------------------------------------------------
-      // SERVER TIME
-      // ------------------------------------------------
 
       const startedAt = new Date();
 
-      const expiresAt = new Date(startedAt.getTime() + timeLimit * 60 * 1000);
+      const timeLimit = Number(quiz.timeLimit) || 30;
 
-      // ------------------------------------------------
-      // STUDENT ID
-      // ------------------------------------------------
+      const expiresAt = new Date(startedAt.getTime() + timeLimit * 60 * 1000);
 
       const studentId = `${code}-${Date.now()}-${Math.random()
         .toString(36)
         .substring(2, 8)}`;
 
-      // ------------------------------------------------
-      // STUDENT DATA
-      // ------------------------------------------------
-
       const student = {
         id: studentId,
 
-        studentName,
+        studentName: cleanName,
 
-        enrollment,
+        enrollment: cleanEnrollment,
 
         joinedAt: startedAt.toISOString(),
 
@@ -1007,46 +724,22 @@ app.post("/quiz/:code/join", async (req, res) => {
         answers: {},
       };
 
-      // ------------------------------------------------
-      // SAVE STUDENT
-      // ------------------------------------------------
-
       transaction.set(studentRef, student);
 
-      // ------------------------------------------------
-      // UPDATE COUNT
-      // ------------------------------------------------
-
-      const currentTotalStudents = Number(quiz.totalStudents || 0);
-
-      const newTotalStudents = currentTotalStudents + 1;
+      const currentCount = Number(quiz.totalStudents || 0);
 
       transaction.update(quizRef, {
-        totalStudents: newTotalStudents,
+        totalStudents: currentCount + 1,
       });
 
       return {
         student,
 
-        totalStudents: newTotalStudents,
+        totalStudents: currentCount + 1,
       };
     });
 
-    // -----------------------------------------------------
-    // LOG
-    // -----------------------------------------------------
-
-    console.log(
-      `✅ Student started quiz ${code}: ${studentName} (${enrollment})`,
-    );
-
-    console.log(`⏱️ Timer: ${timeLimit} minutes`);
-
-    console.log(`⏰ Expires: ${result.student.expiresAt}`);
-
-    // -----------------------------------------------------
-    // RESPONSE
-    // -----------------------------------------------------
+    console.log(`Student started ${code}: ${cleanName} (${cleanEnrollment})`);
 
     res.json({
       success: true,
@@ -1074,30 +767,17 @@ app.post("/quiz/:code/join", async (req, res) => {
       serverTime: new Date().toISOString(),
     });
   } catch (error) {
-    // -----------------------------------------------------
-    // DUPLICATE ENROLLMENT
-    // -----------------------------------------------------
-
-    if (
-      error.code === "DUPLICATE_ENROLLMENT" ||
-      error.message === "DUPLICATE_ENROLLMENT"
-    ) {
+    if (error.message === "DUPLICATE_ENROLLMENT") {
       return res.status(409).json({
         success: false,
-
         error: "This enrollment number has already joined this test.",
       });
     }
 
-    // -----------------------------------------------------
-    // OTHER ERROR
-    // -----------------------------------------------------
-
-    console.error("❌ STUDENT JOIN ERROR:", error);
+    console.error("STUDENT JOIN ERROR:", error);
 
     res.status(500).json({
       success: false,
-
       error: "Failed to start quiz.",
     });
   }
@@ -1106,29 +786,50 @@ app.post("/quiz/:code/join", async (req, res) => {
 // =========================================================
 // SUBMIT QUIZ
 // =========================================================
+//
+// Frontend sends:
+//
+// {
+//   "enrollment": "BCA001",
+//   "answers": {
+//      "0": 1,
+//      "1": 3,
+//      "2": 0
+//   }
+// }
+//
+// Answer values are option indexes.
+// =========================================================
 
 app.post("/quiz/:code/submit", async (req, res) => {
   try {
-    const code = req.params.code.toUpperCase();
+    const code = normalizeCode(req.params.code);
 
-    const { enrollment, answers = {} } = req.body;
+    const { enrollment, answers } = req.body;
 
-    // -----------------------------------------------------
-    // VALIDATE ENROLLMENT
-    // -----------------------------------------------------
+    // ---------------------------------------------------
+    // VALIDATION
+    // ---------------------------------------------------
 
-    if (!enrollment || !enrollment.trim()) {
+    if (!enrollment) {
       return res.status(400).json({
         success: false,
         error: "Enrollment number is required.",
       });
     }
 
-    const cleanEnrollment = enrollment.trim().toUpperCase();
+    if (!answers || typeof answers !== "object") {
+      return res.status(400).json({
+        success: false,
+        error: "Answers are required.",
+      });
+    }
 
-    // -----------------------------------------------------
+    const cleanEnrollment = normalizeEnrollment(enrollment);
+
+    // ---------------------------------------------------
     // GET QUIZ
-    // -----------------------------------------------------
+    // ---------------------------------------------------
 
     const quizRef = db.collection("quizzes").doc(code);
 
@@ -1143,9 +844,9 @@ app.post("/quiz/:code/submit", async (req, res) => {
 
     const quiz = quizSnapshot.data();
 
-    // -----------------------------------------------------
+    // ---------------------------------------------------
     // GET STUDENT
-    // -----------------------------------------------------
+    // ---------------------------------------------------
 
     const studentRef = quizRef.collection("students").doc(cleanEnrollment);
 
@@ -1154,183 +855,149 @@ app.post("/quiz/:code/submit", async (req, res) => {
     if (!studentSnapshot.exists) {
       return res.status(404).json({
         success: false,
-        error: "Student has not joined this quiz.",
+        error: "Student attempt not found. Please join the quiz first.",
       });
     }
 
     const student = studentSnapshot.data();
 
-    // -----------------------------------------------------
-    // CHECK ALREADY SUBMITTED
-    // -----------------------------------------------------
+    // ---------------------------------------------------
+    // ALREADY SUBMITTED
+    // ---------------------------------------------------
 
-    if (student.submitted === true) {
+    if (student.submitted) {
       return res.status(409).json({
         success: false,
-        error: "Quiz has already been submitted.",
+        error: "This quiz has already been submitted.",
       });
     }
 
-    // -----------------------------------------------------
-    // CHECK QUESTIONS
-    // -----------------------------------------------------
-
-    if (!Array.isArray(quiz.questions)) {
-      return res.status(500).json({
-        success: false,
-        error: "Quiz questions are missing.",
-      });
-    }
-
-    // -----------------------------------------------------
-    // CHECK TIMER
-    // -----------------------------------------------------
+    // ---------------------------------------------------
+    // TIMER CHECK
+    // ---------------------------------------------------
 
     const now = new Date();
 
-    const expiresAt = student.expiresAt ? new Date(student.expiresAt) : null;
+    const expiresAt = new Date(student.expiresAt);
 
-    const isTimeExpired = expiresAt && now.getTime() >= expiresAt.getTime();
+    const isExpired = now > expiresAt;
 
-    // -----------------------------------------------------
+    // ---------------------------------------------------
     // CALCULATE SCORE
-    // -----------------------------------------------------
+    // ---------------------------------------------------
+
+    const questions = quiz.questions || [];
+
+    const marksPerQuestion = Number(quiz.marksPerQuestion) || 1;
 
     let score = 0;
-    let correctAnswers = 0;
-    let wrongAnswers = 0;
-    let unanswered = 0;
 
-    const processedAnswers = {};
+    const review = [];
 
-    quiz.questions.forEach((question, index) => {
-      const submittedAnswer = answers[index];
-
-      const hasAnswer =
-        submittedAnswer !== undefined &&
-        submittedAnswer !== null &&
-        submittedAnswer !== "";
-
-      const selectedAnswer = hasAnswer ? Number(submittedAnswer) : null;
+    questions.forEach((question, index) => {
+      const selectedAnswer =
+        answers[index] !== undefined ? Number(answers[index]) : null;
 
       const correctAnswer = Number(question.correctAnswer);
 
-      let isCorrect = false;
+      const isCorrect =
+        selectedAnswer !== null && selectedAnswer === correctAnswer;
 
-      if (!hasAnswer) {
-        unanswered++;
-      } else if (
-        Number.isInteger(selectedAnswer) &&
-        selectedAnswer >= 0 &&
-        selectedAnswer <= 3
-      ) {
-        if (selectedAnswer === correctAnswer) {
-          isCorrect = true;
-
-          correctAnswers++;
-
-          score += Number(question.marks || 1);
-        } else {
-          wrongAnswers++;
-        }
-      } else {
-        unanswered++;
+      if (isCorrect) {
+        score += Number(question.marks || marksPerQuestion);
       }
 
-      processedAnswers[index] = {
-        selectedAnswer,
-        correctAnswer,
-        isCorrect,
-        marks: isCorrect ? Number(question.marks || 1) : 0,
-      };
-    });
+      review.push({
+        question: question.question,
 
-    // -----------------------------------------------------
-    // TOTAL MARKS
-    // -----------------------------------------------------
+        options: question.options,
+
+        selectedAnswer,
+
+        correctAnswer,
+
+        isCorrect,
+
+        marks: Number(question.marks || marksPerQuestion),
+
+        explanation: question.explanation || "",
+      });
+    });
 
     const totalMarks =
       Number(quiz.totalMarks) ||
-      quiz.questions.reduce(
-        (total, question) => total + Number(question.marks || 1),
+      questions.reduce(
+        (total, question) => total + Number(question.marks || marksPerQuestion),
         0,
       );
-
-    // -----------------------------------------------------
-    // PERCENTAGE
-    // -----------------------------------------------------
 
     const percentage =
       totalMarks > 0 ? Number(((score / totalMarks) * 100).toFixed(2)) : 0;
 
-    // -----------------------------------------------------
-    // SUBMISSION STATUS
-    // -----------------------------------------------------
+    // ---------------------------------------------------
+    // FINAL STATUS
+    // ---------------------------------------------------
 
-    const submissionStatus = isTimeExpired ? "auto_submitted" : "submitted";
+    const finalStatus = isExpired ? "time_expired" : "submitted";
 
     const submittedAt = now.toISOString();
 
-    // -----------------------------------------------------
+    // ---------------------------------------------------
     // SAVE RESULT
-    // -----------------------------------------------------
+    // ---------------------------------------------------
 
     await studentRef.update({
-      answers: processedAnswers,
-
-      score,
-
-      totalMarks,
-
-      percentage,
-
-      correctAnswers,
-
-      wrongAnswers,
-
-      unanswered,
+      answers,
 
       submitted: true,
 
       submittedAt,
 
-      status: submissionStatus,
-    });
-
-    console.log(`Quiz submitted: ${code} - ${cleanEnrollment}`);
-
-    console.log(`Score: ${score}/${totalMarks} (${percentage}%)`);
-
-    // -----------------------------------------------------
-    // RESPONSE
-    // -----------------------------------------------------
-
-    res.json({
-      success: true,
-
-      message: isTimeExpired
-        ? "Time expired. Quiz was automatically submitted."
-        : "Quiz submitted successfully.",
-
-      quizCode: code,
-
-      enrollment: cleanEnrollment,
-
       score,
 
       totalMarks,
 
       percentage,
 
-      correctAnswers,
+      status: finalStatus,
+    });
 
-      wrongAnswers,
+    console.log(
+      `Quiz submitted: ${code} / ${cleanEnrollment} / ${score}/${totalMarks}`,
+    );
 
-      unanswered,
+    // ---------------------------------------------------
+    // RESPONSE
+    // ---------------------------------------------------
 
-      submittedAt,
+    res.json({
+      success: true,
 
-      status: submissionStatus,
+      message: isExpired
+        ? "Time expired. Your answers were submitted automatically."
+        : "Quiz submitted successfully.",
+
+      result: {
+        quizCode: code,
+
+        enrollment: cleanEnrollment,
+
+        studentName: student.studentName,
+
+        score,
+
+        totalMarks,
+
+        percentage,
+
+        submittedAt,
+
+        status: finalStatus,
+
+        totalQuestions: questions.length,
+      },
+
+      review,
     });
   } catch (error) {
     console.error("SUBMIT QUIZ ERROR:", error);
@@ -1343,18 +1010,18 @@ app.post("/quiz/:code/submit", async (req, res) => {
 });
 
 // =========================================================
-// VIEW QUIZ RESULT / SCORE
+// VIEW SCORE
+// =========================================================
+//
+// GET:
+// /quiz/STXABC123/result/BCA001
 // =========================================================
 
 app.get("/quiz/:code/result/:enrollment", async (req, res) => {
   try {
-    const code = req.params.code.toUpperCase();
+    const code = normalizeCode(req.params.code);
 
-    const enrollment = req.params.enrollment.trim().toUpperCase();
-
-    // -----------------------------------------------------
-    // GET QUIZ
-    // -----------------------------------------------------
+    const enrollment = normalizeEnrollment(req.params.enrollment);
 
     const quizRef = db.collection("quizzes").doc(code);
 
@@ -1368,10 +1035,6 @@ app.get("/quiz/:code/result/:enrollment", async (req, res) => {
     }
 
     const quiz = quizSnapshot.data();
-
-    // -----------------------------------------------------
-    // GET STUDENT
-    // -----------------------------------------------------
 
     const studentRef = quizRef.collection("students").doc(enrollment);
 
@@ -1386,20 +1049,12 @@ app.get("/quiz/:code/result/:enrollment", async (req, res) => {
 
     const student = studentSnapshot.data();
 
-    // -----------------------------------------------------
-    // CHECK SUBMISSION
-    // -----------------------------------------------------
-
     if (!student.submitted) {
       return res.status(400).json({
         success: false,
         error: "Quiz has not been submitted yet.",
       });
     }
-
-    // -----------------------------------------------------
-    // RESPONSE
-    // -----------------------------------------------------
 
     res.json({
       success: true,
@@ -1411,25 +1066,17 @@ app.get("/quiz/:code/result/:enrollment", async (req, res) => {
 
         enrollment: student.enrollment,
 
-        score: Number(student.score || 0),
+        score: student.score,
 
-        totalMarks: Number(student.totalMarks || 0),
+        totalMarks: student.totalMarks,
 
-        percentage: Number(student.percentage || 0),
-
-        correctAnswers: Number(student.correctAnswers || 0),
-
-        wrongAnswers: Number(student.wrongAnswers || 0),
-
-        unanswered: Number(student.unanswered || 0),
+        percentage: student.percentage,
 
         submittedAt: student.submittedAt,
 
         status: student.status,
 
-        totalQuestions: Array.isArray(quiz.questions)
-          ? quiz.questions.length
-          : 0,
+        totalQuestions: quiz.totalQuestions || quiz.questions.length,
       },
     });
   } catch (error) {
@@ -1443,18 +1090,20 @@ app.get("/quiz/:code/result/:enrollment", async (req, res) => {
 });
 
 // =========================================================
-// REVIEW QUIZ ANSWERS
+// REVIEW ANSWERS
+// =========================================================
+//
+// GET:
+// /quiz/STXABC123/review/BCA001
+//
+// Correct answers are ONLY exposed after submission.
 // =========================================================
 
 app.get("/quiz/:code/review/:enrollment", async (req, res) => {
   try {
-    const code = req.params.code.toUpperCase();
+    const code = normalizeCode(req.params.code);
 
-    const enrollment = req.params.enrollment.trim().toUpperCase();
-
-    // -----------------------------------------------------
-    // GET QUIZ
-    // -----------------------------------------------------
+    const enrollment = normalizeEnrollment(req.params.enrollment);
 
     const quizRef = db.collection("quizzes").doc(code);
 
@@ -1469,10 +1118,6 @@ app.get("/quiz/:code/review/:enrollment", async (req, res) => {
 
     const quiz = quizSnapshot.data();
 
-    // -----------------------------------------------------
-    // GET STUDENT
-    // -----------------------------------------------------
-
     const studentRef = quizRef.collection("students").doc(enrollment);
 
     const studentSnapshot = await studentRef.get();
@@ -1480,15 +1125,11 @@ app.get("/quiz/:code/review/:enrollment", async (req, res) => {
     if (!studentSnapshot.exists) {
       return res.status(404).json({
         success: false,
-        error: "Student not found.",
+        error: "Student attempt not found.",
       });
     }
 
     const student = studentSnapshot.data();
-
-    // -----------------------------------------------------
-    // CHECK SUBMISSION
-    // -----------------------------------------------------
 
     if (!student.submitted) {
       return res.status(403).json({
@@ -1497,28 +1138,20 @@ app.get("/quiz/:code/review/:enrollment", async (req, res) => {
       });
     }
 
-    // -----------------------------------------------------
-    // BUILD REVIEW
-    // -----------------------------------------------------
+    const answers = student.answers || {};
 
-    const savedAnswers = student.answers || {};
+    const questions = quiz.questions || [];
 
-    const review = (quiz.questions || []).map((question, index) => {
-      const answerData = savedAnswers[index] || {};
-
+    const review = questions.map((question, index) => {
       const selectedAnswer =
-        answerData.selectedAnswer !== undefined
-          ? answerData.selectedAnswer
-          : null;
+        answers[index] !== undefined ? Number(answers[index]) : null;
 
       const correctAnswer = Number(question.correctAnswer);
 
       const isCorrect =
-        selectedAnswer !== null && Number(selectedAnswer) === correctAnswer;
+        selectedAnswer !== null && selectedAnswer === correctAnswer;
 
       return {
-        questionNumber: index + 1,
-
         question: question.question,
 
         options: question.options,
@@ -1529,44 +1162,28 @@ app.get("/quiz/:code/review/:enrollment", async (req, res) => {
 
         isCorrect,
 
-        marks: Number(question.marks || 1),
-
-        marksObtained: isCorrect ? Number(question.marks || 1) : 0,
+        marks: Number(question.marks || quiz.marksPerQuestion || 1),
 
         explanation: question.explanation || "",
-
-        difficulty: question.difficulty || "",
       };
     });
-
-    // -----------------------------------------------------
-    // RESPONSE
-    // -----------------------------------------------------
 
     res.json({
       success: true,
 
       quizCode: code,
 
-      student: {
-        studentName: student.studentName,
+      studentName: student.studentName,
 
-        enrollment: student.enrollment,
-      },
+      enrollment: student.enrollment,
 
-      result: {
-        score: Number(student.score || 0),
+      score: student.score,
 
-        totalMarks: Number(student.totalMarks || 0),
+      totalMarks: student.totalMarks,
 
-        percentage: Number(student.percentage || 0),
+      percentage: student.percentage,
 
-        correctAnswers: Number(student.correctAnswers || 0),
-
-        wrongAnswers: Number(student.wrongAnswers || 0),
-
-        unanswered: Number(student.unanswered || 0),
-      },
+      status: student.status,
 
       review,
     });
@@ -1581,26 +1198,15 @@ app.get("/quiz/:code/review/:enrollment", async (req, res) => {
 });
 
 // =========================================================
-// GET STUDENTS OF QUIZ
+// GET STUDENTS
 // =========================================================
 //
-// This endpoint is primarily for the teacher/admin side.
+// Useful for teacher/admin MVP.
 // =========================================================
 
 app.get("/quiz/:code/students", async (req, res) => {
   try {
     const code = normalizeCode(req.params.code);
-
-    if (!code) {
-      return res.status(400).json({
-        success: false,
-        error: "Quiz code is required.",
-      });
-    }
-
-    // ---------------------------------------------------
-    // CHECK QUIZ
-    // ---------------------------------------------------
 
     const quizRef = db.collection("quizzes").doc(code);
 
@@ -1609,14 +1215,9 @@ app.get("/quiz/:code/students", async (req, res) => {
     if (!quizSnapshot.exists) {
       return res.status(404).json({
         success: false,
-
         error: "Quiz not found.",
       });
     }
-
-    // ---------------------------------------------------
-    // GET STUDENTS
-    // ---------------------------------------------------
 
     const studentsSnapshot = await quizRef
       .collection("students")
@@ -1628,10 +1229,6 @@ app.get("/quiz/:code/students", async (req, res) => {
       ...doc.data(),
     }));
 
-    // ---------------------------------------------------
-    // RESPONSE
-    // ---------------------------------------------------
-
     res.json({
       success: true,
 
@@ -1642,34 +1239,22 @@ app.get("/quiz/:code/students", async (req, res) => {
       students,
     });
   } catch (error) {
-    console.error("❌ GET STUDENTS ERROR:", error);
+    console.error("GET STUDENTS ERROR:", error);
 
     res.status(500).json({
       success: false,
-
       error: "Failed to load students.",
     });
   }
 });
 
 // =========================================================
-// GET LIVE STUDENT COUNT
+// LIVE STUDENT COUNT
 // =========================================================
 
 app.get("/quiz/:code/student-count", async (req, res) => {
   try {
     const code = normalizeCode(req.params.code);
-
-    if (!code) {
-      return res.status(400).json({
-        success: false,
-        error: "Quiz code is required.",
-      });
-    }
-
-    // ---------------------------------------------------
-    // CHECK QUIZ
-    // ---------------------------------------------------
 
     const quizRef = db.collection("quizzes").doc(code);
 
@@ -1678,36 +1263,24 @@ app.get("/quiz/:code/student-count", async (req, res) => {
     if (!quizSnapshot.exists) {
       return res.status(404).json({
         success: false,
-
         error: "Quiz not found.",
       });
     }
 
-    // ---------------------------------------------------
-    // COUNT STUDENTS
-    // ---------------------------------------------------
-
     const studentsSnapshot = await quizRef.collection("students").get();
-
-    const totalStudents = studentsSnapshot.size;
-
-    // ---------------------------------------------------
-    // RESPONSE
-    // ---------------------------------------------------
 
     res.json({
       success: true,
 
       quizCode: code,
 
-      totalStudents,
+      totalStudents: studentsSnapshot.size,
     });
   } catch (error) {
-    console.error("❌ GET STUDENT COUNT ERROR:", error);
+    console.error("GET STUDENT COUNT ERROR:", error);
 
     res.status(500).json({
       success: false,
-
       error: "Failed to get student count.",
     });
   }
@@ -1720,11 +1293,5 @@ app.get("/quiz/:code/student-count", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("==========================================");
-
-  console.log(`🚀 Advance's Quiz Backend running on port ${PORT}`);
-
-  console.log(`🌐 Environment: ${process.env.NODE_ENV || "development"}`);
-
-  console.log("==========================================");
+  console.log(`Server running on port ${PORT}`);
 });
