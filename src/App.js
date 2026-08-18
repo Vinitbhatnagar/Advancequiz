@@ -207,9 +207,9 @@ function App() {
     };
   }, [role, quizStarted]);
 
-  const [studentResult, setStudentResult] = useState(null);
-  const [timeLeft, setTimeLeft] = useState(0);
-  const [submittingQuiz, setSubmittingQuiz] = useState(false);
+  // const [studentResult, setStudentResult] = useState(null);
+  // const [timeLeft, setTimeLeft] = useState(0);
+  // const [submittingQuiz, setSubmittingQuiz] = useState(false);
   // =========================================================
   // STUDENT ANTI-COPY / PASTE PROTECTION
   // =========================================================
