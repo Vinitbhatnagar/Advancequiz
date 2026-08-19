@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { QRCodeCanvas } from "qrcode.react";
 import "./App.css";
@@ -9,6 +9,7 @@ function App() {
   // =========================================================
   // TEACHER STATE
   // =========================================================
+
   const [file, setFile] = useState(null);
 
   const [numberOfQuestions, setNumberOfQuestions] = useState(10);
@@ -29,6 +30,9 @@ function App() {
 
   const [regeneratingQuestion, setRegeneratingQuestion] = useState(null);
 
+  // Custom quiz time in minutes
+  const [timeLimit, setTimeLimit] = useState(30);
+
   // =========================================================
   // MANUAL QUESTION STATE
   // =========================================================
@@ -46,79 +50,123 @@ function App() {
   const [manualExplanation, setManualExplanation] = useState("");
 
   const [manualQuestions, setManualQuestions] = useState([]);
+
   // =========================================================
   // STUDENT STATE
   // =========================================================
 
   const [studentQuiz, setStudentQuiz] = useState(null);
+
   const [currentQuestion, setCurrentQuestion] = useState(0);
+
   const [studentAnswers, setStudentAnswers] = useState({});
+
   const [quizStarted, setQuizStarted] = useState(false);
+
   const [studentCount, setStudentCount] = useState(0);
 
   const [studentName, setStudentName] = useState("");
+
   const [enrollment, setEnrollment] = useState("");
+
   const [joinCode, setJoinCode] = useState("");
 
   const [studentResult, setStudentResult] = useState(null);
+
   const [timeLeft, setTimeLeft] = useState(0);
+
   const [submittingQuiz, setSubmittingQuiz] = useState(false);
 
-  const submitQuiz = async (autoSubmit = false) => {
-    if (!studentQuiz || submittingQuiz) {
-      return;
-    }
+  // =========================================================
+  // FORMAT TIMER
+  // =========================================================
 
-    const confirmed = autoSubmit
-      ? true
-      : window.confirm("Are you sure you want to submit the quiz?");
-
-    if (!confirmed) {
-      return;
-    }
-
-    setSubmittingQuiz(true);
-
-    try {
-      const code = studentQuiz.code.toUpperCase();
-
-      const response = await axios.post(
-        `https://advancequiz.onrender.com/quiz/${code}/submit`,
-        {
-          enrollment: enrollment.trim().toUpperCase(),
-          answers: studentAnswers,
-        },
-      );
-
-      console.log("Quiz submitted:", response.data);
-
-      setStudentResult(response.data.result);
-
-      setQuizStarted(false);
-    } catch (error) {
-      console.error("SUBMIT QUIZ ERROR:", error);
-
-      alert(error.response?.data?.error || "Failed to submit quiz.");
-    } finally {
-      setSubmittingQuiz(false);
-    }
-  };
   const formatTime = (seconds) => {
-    const minutes = Math.floor(seconds / 60);
+    const safeSeconds = Math.max(0, Number(seconds) || 0);
 
-    const remainingSeconds = seconds % 60;
+    const minutes = Math.floor(safeSeconds / 60);
+
+    const remainingSeconds = safeSeconds % 60;
 
     return `${String(minutes).padStart(2, "0")}:${String(
       remainingSeconds,
     ).padStart(2, "0")}`;
   };
 
+  // =========================================================
+  // SUBMIT QUIZ
+  // =========================================================
+
+  const submitQuiz = useCallback(
+    async (autoSubmit = false) => {
+      if (!studentQuiz || submittingQuiz || studentResult) {
+        return;
+      }
+
+      const confirmed = autoSubmit
+        ? true
+        : window.confirm("Are you sure you want to submit the quiz?");
+
+      if (!confirmed) {
+        return;
+      }
+
+      setSubmittingQuiz(true);
+
+      try {
+        const code = studentQuiz.code.toUpperCase();
+
+        const cleanEnrollment = enrollment.trim().toUpperCase();
+
+        if (!cleanEnrollment) {
+          throw new Error("Enrollment number is missing.");
+        }
+
+        const response = await axios.post(
+          `https://advancequiz.onrender.com/quiz/${code}/submit`,
+          {
+            enrollment: cleanEnrollment,
+            answers: studentAnswers,
+          },
+        );
+
+        console.log("QUIZ SUBMITTED:", response.data);
+
+        if (!response.data.success) {
+          throw new Error(response.data.error || "Failed to submit quiz.");
+        }
+
+        setStudentResult(response.data.result);
+
+        setQuizStarted(false);
+
+        setTimeLeft(0);
+      } catch (error) {
+        console.error("SUBMIT QUIZ ERROR:", error);
+
+        alert(
+          error.response?.data?.error ||
+            error.message ||
+            "Failed to submit quiz.",
+        );
+      } finally {
+        setSubmittingQuiz(false);
+      }
+    },
+    [studentQuiz, submittingQuiz, studentResult, enrollment, studentAnswers],
+  );
+
+  // =========================================================
+  // STUDENT TIMER
+  // =========================================================
+  //
+  // The server gives us expiresAt when the student joins.
+  // The frontend counts down from that server-controlled time.
+  //
+  // =========================================================
+
   useEffect(() => {
     if (!quizStarted || !studentQuiz || studentResult) {
-      return;
-    }
-
-    if (timeLeft <= 0) {
       return;
     }
 
@@ -126,10 +174,6 @@ function App() {
       setTimeLeft((previous) => {
         if (previous <= 1) {
           clearInterval(timer);
-
-          // Auto submit when time expires
-          submitQuiz(true);
-
           return 0;
         }
 
@@ -137,9 +181,37 @@ function App() {
       });
     }, 1000);
 
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quizStarted, studentQuiz, studentResult, timeLeft]);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [quizStarted, studentQuiz, studentResult]);
+
+  // =========================================================
+  // AUTO SUBMIT WHEN TIMER REACHES ZERO
+  // =========================================================
+
+  useEffect(() => {
+    if (!quizStarted || !studentQuiz || studentResult) {
+      return;
+    }
+
+    if (timeLeft > 0) {
+      return;
+    }
+
+    if (submittingQuiz) {
+      return;
+    }
+
+    submitQuiz(true);
+  }, [
+    quizStarted,
+    studentQuiz,
+    studentResult,
+    timeLeft,
+    submittingQuiz,
+    submitQuiz,
+  ]);
 
   // =========================================================
   // LIVE STUDENT COUNT
@@ -166,16 +238,18 @@ function App() {
       }
     };
 
-    // Fetch immediately
     fetchStudentCount();
 
-    // Then refresh every 3 seconds
     interval = setInterval(fetchStudentCount, 3000);
 
     return () => {
       clearInterval(interval);
     };
   }, [published, quizCode]);
+
+  // =========================================================
+  // AUTO JOIN FROM /join/CODE URL
+  // =========================================================
 
   useEffect(() => {
     const path = window.location.pathname;
@@ -190,8 +264,14 @@ function App() {
     }
   }, []);
 
+  // =========================================================
+  // STUDENT BASIC COPY PROTECTION
+  // =========================================================
+
   useEffect(() => {
-    if (!(role === "student" && quizStarted)) return;
+    if (!(role === "student" && quizStarted)) {
+      return;
+    }
 
     const prevent = (e) => e.preventDefault();
 
@@ -208,14 +288,11 @@ function App() {
     };
   }, [role, quizStarted]);
 
-  // const [studentResult, setStudentResult] = useState(null);
-  // const [timeLeft, setTimeLeft] = useState(0);
-  // const [submittingQuiz, setSubmittingQuiz] = useState(false);
   // =========================================================
   // STUDENT ANTI-COPY / PASTE PROTECTION
   // =========================================================
+
   useEffect(() => {
-    // Protection is active only during the actual quiz
     if (role !== "student" || !quizStarted) {
       return;
     }
@@ -235,13 +312,13 @@ function App() {
     const preventKeyboardShortcuts = (e) => {
       const key = e.key.toLowerCase();
 
-      // Copy, paste, cut, select all
+      // Copy / paste / cut / select all
       if ((e.ctrlKey || e.metaKey) && ["c", "v", "x", "a"].includes(key)) {
         e.preventDefault();
         return;
       }
 
-      // F12 / DevTools shortcuts
+      // DevTools shortcuts
       if (
         e.key === "F12" ||
         (e.ctrlKey && e.shiftKey && ["i", "j", "c"].includes(key))
@@ -257,8 +334,6 @@ function App() {
     document.addEventListener("dragstart", preventDrag);
     document.addEventListener("keydown", preventKeyboardShortcuts);
 
-    // IMPORTANT:
-    // Remove the protection when the student leaves the quiz.
     return () => {
       document.removeEventListener("copy", preventCopyPaste);
       document.removeEventListener("cut", preventCopyPaste);
@@ -288,11 +363,13 @@ function App() {
 
       formData.append("pdf", file);
 
-      formData.append("numberOfQuestions", numberOfQuestions);
+      formData.append("numberOfQuestions", Number(numberOfQuestions));
 
-      formData.append("marksPerQuestion", marksPerQuestion);
+      formData.append("marksPerQuestion", Number(marksPerQuestion));
 
       formData.append("difficulty", difficulty);
+
+      formData.append("timeLimit", Number(timeLimit));
 
       const response = await axios.post(
         "https://advancequiz.onrender.com/generate-quiz",
@@ -302,13 +379,9 @@ function App() {
       const updatedQuestions = response.data.questions.map(
         (question, index) => ({
           ...question,
-
           id: index + 1,
-
           difficulty: question.difficulty || difficulty,
-
           excluded: false,
-
           source: "ai",
         }),
       );
@@ -317,6 +390,10 @@ function App() {
         ...response.data,
 
         questions: updatedQuestions,
+
+        // IMPORTANT:
+        // Save custom timer inside the quiz object.
+        timeLimit: Number(timeLimit),
       });
     } catch (error) {
       console.error(error);
@@ -388,7 +465,6 @@ function App() {
       newQuestion,
     ]);
 
-    // Reset builder
     setManualQuestion("");
 
     setManualOptions(["", "", "", ""]);
@@ -396,10 +472,6 @@ function App() {
     setManualCorrectAnswer(0);
 
     setManualExplanation("");
-
-    // Keep difficulty and marks
-    // because teachers often create
-    // multiple questions with same settings
   };
 
   // =========================================================
@@ -419,7 +491,6 @@ function App() {
   const createManualQuiz = () => {
     if (manualQuestions.length === 0) {
       alert("Please add at least one question.");
-
       return;
     }
 
@@ -442,6 +513,10 @@ function App() {
       totalMarks,
 
       difficulty: "mixed",
+
+      // IMPORTANT:
+      // Manual quizzes also use the custom timer.
+      timeLimit: Number(timeLimit),
 
       questions: manualQuestions.map((question) => ({
         ...question,
@@ -531,10 +606,15 @@ function App() {
   // =========================================================
 
   const regenerateQuestion = async (questionId) => {
-    if (!quiz) return;
+    if (!quiz) {
+      return;
+    }
 
     const question = quiz.questions.find((q) => q.id === questionId);
-    if (!question) return;
+
+    if (!question) {
+      return;
+    }
 
     setRegeneratingQuestion(questionId);
 
@@ -551,16 +631,23 @@ function App() {
 
       setQuiz((prevQuiz) => ({
         ...prevQuiz,
+
         questions: prevQuiz.questions.map((item) =>
           item.id === questionId
             ? {
                 ...item,
+
                 question: newQuestion.question,
+
                 options: newQuestion.options,
+
                 correctAnswer: newQuestion.correctAnswer,
+
                 explanation: newQuestion.explanation || "",
+
                 difficulty:
                   newQuestion.difficulty || item.difficulty || "moderate",
+
                 excluded: false,
               }
             : item,
@@ -568,6 +655,7 @@ function App() {
       }));
     } catch (error) {
       console.error(error);
+
       alert(error.response?.data?.error || "Failed to regenerate question.");
     } finally {
       setRegeneratingQuestion(null);
@@ -602,10 +690,6 @@ function App() {
   };
 
   // =========================================================
-  // GENERATE QUIZ CODE
-  // =========================================================
-
-  // =========================================================
   // PUBLISH QUIZ
   // =========================================================
 
@@ -618,12 +702,30 @@ function App() {
     }
 
     try {
+      const finalTimeLimit = Math.min(
+        180,
+        Math.max(1, Number(quiz?.timeLimit || timeLimit || 30)),
+      );
+
       const quizToPublish = {
         ...quiz,
+
         questions: activeQuestions,
+
         totalQuestions: activeQuestions.length,
+
         totalMarks: getCurrentTotalMarks(),
+
+        // IMPORTANT:
+        // This is the timer the backend should use.
+        timeLimit: finalTimeLimit,
       };
+
+      console.log(
+        "PUBLISHING QUIZ WITH TIME LIMIT:",
+        finalTimeLimit,
+        "minutes",
+      );
 
       const response = await axios.post(
         "https://advancequiz.onrender.com/publish-quiz",
@@ -632,10 +734,17 @@ function App() {
         },
       );
 
+      setQuiz((previousQuiz) => ({
+        ...previousQuiz,
+        ...quizToPublish,
+      }));
+
       setQuizCode(response.data.code);
+
       setPublished(true);
     } catch (error) {
       console.error(error);
+
       alert(error.response?.data?.error || "Failed to publish quiz.");
     }
   };
@@ -650,20 +759,43 @@ function App() {
 
     // Teacher
     setFile(null);
+
     setQuiz(null);
+
     setPublished(false);
+
     setQuizCode("");
+
     setManualQuestions([]);
+
     setRegeneratingQuestion(null);
+
+    setCreationMode(null);
+
+    setTimeLimit(30);
 
     // Student
     setStudentQuiz(null);
+
     setQuizStarted(false);
+
     setCurrentQuestion(0);
+
     setStudentAnswers({});
+
     setStudentName("");
+
     setEnrollment("");
+
     setJoinCode("");
+
+    setStudentResult(null);
+
+    setTimeLeft(0);
+
+    setSubmittingQuiz(false);
+
+    setStudentCount(0);
   };
 
   // =========================================================
@@ -748,8 +880,6 @@ function App() {
               </div>
 
               <div className="role-grid">
-                {/* AI */}
-
                 <button
                   className="role-card"
                   onClick={() => setCreationMode("ai")}
@@ -765,8 +895,6 @@ function App() {
 
                   <span className="role-button">Generate with AI →</span>
                 </button>
-
-                {/* MANUAL */}
 
                 <button
                   className="role-card"
@@ -841,7 +969,9 @@ function App() {
                       min="1"
                       max="50"
                       value={numberOfQuestions}
-                      onChange={(e) => setNumberOfQuestions(e.target.value)}
+                      onChange={(e) =>
+                        setNumberOfQuestions(Number(e.target.value))
+                      }
                     />
                   </div>
 
@@ -853,7 +983,9 @@ function App() {
                       min="1"
                       max="20"
                       value={marksPerQuestion}
-                      onChange={(e) => setMarksPerQuestion(e.target.value)}
+                      onChange={(e) =>
+                        setMarksPerQuestion(Number(e.target.value))
+                      }
                     />
                   </div>
 
@@ -871,6 +1003,39 @@ function App() {
 
                       <option value="hard">Hard</option>
                     </select>
+                  </div>
+
+                  {/* =================================================
+                      CUSTOM TIMER
+                  ================================================= */}
+
+                  <div className="setting">
+                    <label>Quiz Time Limit (Minutes)</label>
+
+                    <input
+                      type="number"
+                      min="1"
+                      max="180"
+                      value={timeLimit}
+                      onChange={(e) => {
+                        const value = Number(e.target.value);
+
+                        if (value >= 1 && value <= 180) {
+                          setTimeLimit(value);
+                        }
+                      }}
+                    />
+
+                    <small
+                      style={{
+                        display: "block",
+                        marginTop: "6px",
+                        opacity: 0.7,
+                      }}
+                    >
+                      Students will have {timeLimit} minute
+                      {timeLimit !== 1 ? "s" : ""} to complete this quiz.
+                    </small>
                   </div>
 
                   <div className="total-marks">
@@ -915,6 +1080,44 @@ function App() {
                   Create your own questions and build the quiz exactly the way
                   you want.
                 </p>
+              </div>
+
+              {/* CUSTOM TIMER */}
+
+              <div
+                className="question-card"
+                style={{
+                  marginBottom: "24px",
+                }}
+              >
+                <div className="setting">
+                  <label>Quiz Time Limit (Minutes)</label>
+
+                  <input
+                    type="number"
+                    min="1"
+                    max="180"
+                    value={timeLimit}
+                    onChange={(e) => {
+                      const value = Number(e.target.value);
+
+                      if (value >= 1 && value <= 180) {
+                        setTimeLimit(value);
+                      }
+                    }}
+                  />
+
+                  <small
+                    style={{
+                      display: "block",
+                      marginTop: "6px",
+                      opacity: 0.7,
+                    }}
+                  >
+                    Students will have {timeLimit} minute
+                    {timeLimit !== 1 ? "s" : ""} to complete this quiz.
+                  </small>
+                </div>
               </div>
 
               {/* QUESTION BUILDER */}
@@ -1010,7 +1213,7 @@ function App() {
                     min="1"
                     max="20"
                     value={manualMarks}
-                    onChange={(e) => setManualMarks(e.target.value)}
+                    onChange={(e) => setManualMarks(Number(e.target.value))}
                   />
                 </div>
 
@@ -1165,6 +1368,33 @@ function App() {
                 </p>
               </div>
 
+              {/* TIMER SUMMARY */}
+
+              <div
+                className="quiz-summary"
+                style={{
+                  marginBottom: "20px",
+                }}
+              >
+                <div>
+                  <span>Quiz Time</span>
+
+                  <strong>{quiz.timeLimit || timeLimit} min</strong>
+                </div>
+
+                <div>
+                  <span>Active Questions</span>
+
+                  <strong>{getActiveQuestions().length}</strong>
+                </div>
+
+                <div>
+                  <span>Total Marks</span>
+
+                  <strong>{getCurrentTotalMarks()}</strong>
+                </div>
+              </div>
+
               {/* SUMMARY */}
 
               <div className="quiz-summary">
@@ -1199,8 +1429,6 @@ function App() {
                     }
                     key={q.id}
                   >
-                    {/* HEADER */}
-
                     <div className="question-header">
                       <div className="question-number">Q{index + 1}</div>
 
@@ -1221,8 +1449,6 @@ function App() {
                       )}
                     </div>
 
-                    {/* EXCLUDED */}
-
                     {q.excluded ? (
                       <div className="excluded-content">
                         <div className="excluded-icon">✕</div>
@@ -1242,26 +1468,7 @@ function App() {
                       </div>
                     ) : (
                       <>
-                        {/* SOURCE BADGE */}
-
-                        <div
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: "8px",
-                            marginBottom: "12px",
-                            fontSize: "12px",
-                            fontWeight: 700,
-                            color:
-                              q.source === "manual" ? "#e9d5ff" : "#c4b5fd",
-                          }}
-                        ></div>
-
-                        {/* QUESTION */}
-
                         <h3>{q.question}</h3>
-
-                        {/* OPTIONS */}
 
                         <div className="options">
                           {(q.options || []).map((option, optionIndex) => (
@@ -1284,8 +1491,6 @@ function App() {
                           ))}
                         </div>
 
-                        {/* EXPLANATION */}
-
                         {q.explanation && (
                           <div className="explanation">
                             <strong>
@@ -1297,8 +1502,6 @@ function App() {
                             <p>{q.explanation}</p>
                           </div>
                         )}
-
-                        {/* ACTIONS */}
 
                         <div className="question-actions">
                           {q.source !== "manual" && (
@@ -1335,6 +1538,11 @@ function App() {
                 >
                   Publish Quiz 🚀
                 </button>
+
+                <p>
+                  Quiz timer:{" "}
+                  <strong>{quiz.timeLimit || timeLimit} minutes</strong>
+                </p>
 
                 <p>
                   Only active questions will be included in the published quiz.
@@ -1388,6 +1596,23 @@ function App() {
                 </div>
               </div>
 
+              {/* TIMER INFORMATION */}
+
+              <div
+                className="live-info"
+                style={{
+                  marginTop: "20px",
+                }}
+              >
+                <span>⏱ Quiz Time Limit</span>
+
+                <p>
+                  Students have{" "}
+                  <strong>{quiz.timeLimit || timeLimit} minutes</strong> to
+                  complete this quiz.
+                </p>
+              </div>
+
               <div className="live-info">
                 <span>● Quiz is Live</span>
 
@@ -1411,6 +1636,12 @@ function App() {
 
                   <strong>{studentCount}</strong>
                 </div>
+
+                <div>
+                  <span>Time Limit</span>
+
+                  <strong>{quiz.timeLimit || timeLimit} min</strong>
+                </div>
               </div>
             </div>
           )}
@@ -1418,6 +1649,10 @@ function App() {
       </div>
     );
   }
+
+  // =========================================================
+  // STUDENT RESULT
+  // =========================================================
 
   if (role === "student" && studentResult) {
     return (
@@ -1433,8 +1668,6 @@ function App() {
             <p>
               {studentName} • {enrollment}
             </p>
-
-            {/* SCORE */}
 
             <div
               className="quiz-summary"
@@ -1460,8 +1693,6 @@ function App() {
                 <strong>{studentResult.percentage}%</strong>
               </div>
             </div>
-
-            {/* ANSWER REVIEW */}
 
             <div
               className="questions-list"
@@ -1527,11 +1758,15 @@ function App() {
   }
 
   // =========================================================
-  // STUDENT PANEL
+  // STUDENT ACTIVE QUIZ
   // =========================================================
 
   if (role === "student" && quizStarted && studentQuiz) {
     const q = studentQuiz.questions[currentQuestion];
+
+    const isLastQuestion = currentQuestion === studentQuiz.questions.length - 1;
+
+    const timerIsCritical = timeLeft <= 60;
 
     return (
       <div className="app">
@@ -1557,23 +1792,44 @@ function App() {
                 </p>
               </div>
 
-              {/* TIMER */}
+              {/* SINGLE TIMER */}
 
               <div
                 style={{
                   padding: "12px 18px",
                   borderRadius: "12px",
-                  background: timeLeft <= 60 ? "#7f1d1d" : "#24103f",
+                  background: timerIsCritical ? "#7f1d1d" : "#24103f",
                   color: "#fff",
                   fontWeight: 800,
                   fontSize: "20px",
-                  minWidth: "100px",
+                  minWidth: "110px",
                   textAlign: "center",
+                  boxShadow: timerIsCritical
+                    ? "0 0 20px rgba(220,38,38,0.45)"
+                    : "none",
                 }}
               >
-                {formatTime(timeLeft)}
+                ⏱ {formatTime(timeLeft)}
               </div>
             </div>
+
+            {/* TIMER WARNING */}
+
+            {timeLeft <= 60 && timeLeft > 0 && (
+              <div
+                style={{
+                  padding: "10px 14px",
+                  marginBottom: "20px",
+                  borderRadius: "10px",
+                  background: "#450a0a",
+                  color: "#fecaca",
+                  textAlign: "center",
+                  fontWeight: 700,
+                }}
+              >
+                ⚠️ Less than one minute remaining!
+              </div>
+            )}
 
             {/* QUESTION */}
 
@@ -1608,15 +1864,16 @@ function App() {
             <div className="question-actions">
               <button
                 className="secondary-button"
-                disabled={currentQuestion === 0}
+                disabled={currentQuestion === 0 || submittingQuiz}
                 onClick={() => setCurrentQuestion(currentQuestion - 1)}
               >
                 ← Previous
               </button>
 
-              {currentQuestion < studentQuiz.questions.length - 1 ? (
+              {!isLastQuestion ? (
                 <button
                   className="primary-button"
+                  disabled={submittingQuiz}
                   onClick={() => setCurrentQuestion(currentQuestion + 1)}
                 >
                   Next →
@@ -1636,6 +1893,10 @@ function App() {
       </div>
     );
   }
+
+  // =========================================================
+  // STUDENT JOIN PANEL
+  // =========================================================
 
   return (
     <div className="app">
@@ -1695,24 +1956,28 @@ function App() {
               try {
                 const code = joinCode.trim().toUpperCase();
 
-                // --------------------------------------------------
-                // 1. START / JOIN QUIZ
-                // This performs duplicate enrollment protection
-                // --------------------------------------------------
+                // =================================================
+                // START STUDENT ATTEMPT
+                // =================================================
 
                 const joinResponse = await axios.post(
                   `https://advancequiz.onrender.com/quiz/${code}/join`,
                   {
                     studentName: studentName.trim(),
+
                     enrollment: enrollment.trim().toUpperCase(),
                   },
                 );
 
-                console.log("Quiz joined:", joinResponse.data);
+                if (!joinResponse.data.success) {
+                  throw new Error(
+                    joinResponse.data.error || "Failed to join quiz.",
+                  );
+                }
 
-                // --------------------------------------------------
-                // 2. LOAD QUIZ QUESTIONS
-                // --------------------------------------------------
+                // =================================================
+                // LOAD QUIZ
+                // =================================================
 
                 const quizResponse = await axios.get(
                   `https://advancequiz.onrender.com/quiz/${code}`,
@@ -1720,9 +1985,9 @@ function App() {
 
                 const loadedQuiz = quizResponse.data.quiz;
 
-                // --------------------------------------------------
-                // 3. SAVE QUIZ
-                // --------------------------------------------------
+                // =================================================
+                // SAVE QUIZ
+                // =================================================
 
                 setStudentQuiz(loadedQuiz);
 
@@ -1732,18 +1997,35 @@ function App() {
 
                 setStudentResult(null);
 
-                // --------------------------------------------------
-                // 4. START TIMER FROM SERVER
-                // --------------------------------------------------
+                setSubmittingQuiz(false);
+
+                // =================================================
+                // SERVER-CONTROLLED TIMER
+                // =================================================
+
+                if (!joinResponse.data.student?.expiresAt) {
+                  throw new Error(
+                    "The server did not provide a quiz expiration time.",
+                  );
+                }
 
                 const expiresAt = new Date(
                   joinResponse.data.student.expiresAt,
                 ).getTime();
 
+                const now = Date.now();
+
                 const remainingSeconds = Math.max(
                   0,
-                  Math.floor((expiresAt - Date.now()) / 1000),
+                  Math.ceil((expiresAt - now) / 1000),
                 );
+
+                console.log(
+                  "SERVER QUIZ EXPIRATION:",
+                  new Date(expiresAt).toLocaleString(),
+                );
+
+                console.log("REMAINING SECONDS:", remainingSeconds);
 
                 setTimeLeft(remainingSeconds);
 
@@ -1751,14 +2033,11 @@ function App() {
               } catch (error) {
                 console.error("JOIN QUIZ ERROR:", error);
 
-                if (error.response?.status === 409) {
-                  alert("This enrollment number has already joined this test.");
-                } else {
-                  alert(
-                    error.response?.data?.error ||
-                      "Unable to join quiz. Please check the quiz code.",
-                  );
-                }
+                alert(
+                  error.response?.data?.error ||
+                    error.message ||
+                    "Failed to join quiz.",
+                );
               }
             }}
           >
