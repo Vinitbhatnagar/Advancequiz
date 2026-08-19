@@ -1,53 +1,124 @@
 // ============================================================
-// ADVANCE'S QUIZ - COMPLETE BACKEND
-// Compatible with the exact App.js provided
+// ADVANCE'S QUIZ - SERVER
+// Firebase Firestore + Gemini AI
+// Compatible with the provided React App.js
 // ============================================================
 
-// ============================================================
-// IMPORTS
-// ============================================================
+require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
-const mongoose = require("mongoose");
-const crypto = require("crypto");
 const pdfParse = require("pdf-parse");
+const admin = require("firebase-admin");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-
-require("dotenv").config();
+const crypto = require("crypto");
 
 // ============================================================
-// APP
+// EXPRESS
 // ============================================================
 
 const app = express();
 
-// Render provides PORT automatically.
-// Locally it falls back to 10000.
-const PORT = process.env.PORT || 10000;
-
-// ============================================================
-// MIDDLEWARE
-// ============================================================
-
 app.use(
   cors({
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    origin: true,
+    credentials: true,
   }),
 );
 
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+const PORT = process.env.PORT || 5000;
+
+const MAX_QUIZ_TIME = 180;
+const DEFAULT_QUIZ_TIME = 30;
+
+// ============================================================
+// FIREBASE ADMIN
+// ============================================================
+
+let db;
+
+try {
+  // ----------------------------------------------------------
+  // OPTION 1:
+  // FIREBASE_SERVICE_ACCOUNT_JSON
+  //
+  // Recommended for Render.
+  // ----------------------------------------------------------
+
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    const serviceAccount = JSON.parse(
+      process.env.FIREBASE_SERVICE_ACCOUNT_JSON,
+    );
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  }
+
+  // ----------------------------------------------------------
+  // OPTION 2:
+  // Individual Firebase environment variables
+  // ----------------------------------------------------------
+  else if (
+    process.env.FIREBASE_PROJECT_ID &&
+    process.env.FIREBASE_CLIENT_EMAIL &&
+    process.env.FIREBASE_PRIVATE_KEY
+  ) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+      }),
+    });
+  }
+
+  // ----------------------------------------------------------
+  // OPTION 3:
+  // Local Firebase credentials
+  // ----------------------------------------------------------
+  else {
+    admin.initializeApp({
+      credential: admin.credential.applicationDefault(),
+    });
+  }
+
+  db = admin.firestore();
+
+  console.log("Firebase initialized successfully.");
+} catch (error) {
+  console.error("FIREBASE INITIALIZATION ERROR:");
+  console.error(error);
+
+  process.exit(1);
+}
+
+// ============================================================
+// GEMINI
+// ============================================================
+
+if (!process.env.GEMINI_API_KEY) {
+  console.error("WARNING: GEMINI_API_KEY is missing.");
+}
+
+const genAI = process.env.GEMINI_API_KEY
+  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+  : null;
 
 // ============================================================
 // MULTER
 // ============================================================
 
-// PDF stays in memory.
-// We don't need to permanently save uploaded PDFs.
 const upload = multer({
   storage: multer.memoryStorage(),
 
@@ -56,392 +127,166 @@ const upload = multer({
   },
 
   fileFilter: (req, file, cb) => {
-    const isPdf =
+    if (
       file.mimetype === "application/pdf" ||
-      file.originalname.toLowerCase().endsWith(".pdf");
-
-    if (!isPdf) {
-      return cb(new Error("Only PDF files are allowed."));
+      file.originalname.toLowerCase().endsWith(".pdf")
+    ) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only PDF files are allowed."));
     }
-
-    cb(null, true);
   },
 });
 
 // ============================================================
-// ENVIRONMENT VARIABLES
+// HELPERS
 // ============================================================
 
-const MONGODB_URI = process.env.MONGODB_URI;
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-
-// ============================================================
-// GEMINI
-// ============================================================
-
-let gemini = null;
-let model = null;
-
-if (GEMINI_API_KEY) {
-  gemini = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-  model = gemini.getGenerativeModel({
-    model: GEMINI_MODEL,
-  });
-
-  console.log(`Gemini configured: ${GEMINI_MODEL}`);
-} else {
-  console.warn(
-    "WARNING: GEMINI_API_KEY is missing. AI generation will not work.",
-  );
+function normalizeCode(code) {
+  return String(code || "")
+    .trim()
+    .toUpperCase();
 }
 
-// ============================================================
-// MONGODB SCHEMA
-// ============================================================
-
-const studentSchema = new mongoose.Schema(
-  {
-    studentName: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
-    enrollment: {
-      type: String,
-      required: true,
-      trim: true,
-      uppercase: true,
-    },
-
-    joinedAt: {
-      type: Date,
-      default: Date.now,
-    },
-
-    expiresAt: {
-      type: Date,
-      required: true,
-    },
-
-    submittedAt: {
-      type: Date,
-      default: null,
-    },
-
-    submitted: {
-      type: Boolean,
-      default: false,
-    },
-
-    answers: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {},
-    },
-
-    result: {
-      type: mongoose.Schema.Types.Mixed,
-      default: null,
-    },
-  },
-  {
-    _id: true,
-  },
-);
-
-const questionSchema = new mongoose.Schema(
-  {
-    id: {
-      type: mongoose.Schema.Types.Mixed,
-      required: true,
-    },
-
-    question: {
-      type: String,
-      required: true,
-    },
-
-    options: {
-      type: [String],
-      required: true,
-    },
-
-    correctAnswer: {
-      type: Number,
-      required: true,
-    },
-
-    explanation: {
-      type: String,
-      default: "",
-    },
-
-    difficulty: {
-      type: String,
-      default: "moderate",
-    },
-
-    marks: {
-      type: Number,
-      default: 1,
-    },
-
-    excluded: {
-      type: Boolean,
-      default: false,
-    },
-
-    source: {
-      type: String,
-      enum: ["ai", "manual"],
-      default: "ai",
-    },
-  },
-  {
-    _id: false,
-  },
-);
-
-const quizSchema = new mongoose.Schema(
-  {
-    code: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-    },
-
-    title: {
-      type: String,
-      default: "Advance's Quiz",
-    },
-
-    success: {
-      type: Boolean,
-      default: true,
-    },
-
-    totalQuestions: {
-      type: Number,
-      default: 0,
-    },
-
-    marksPerQuestion: {
-      type: Number,
-      default: 0,
-    },
-
-    totalMarks: {
-      type: Number,
-      default: 0,
-    },
-
-    difficulty: {
-      type: String,
-      default: "moderate",
-    },
-
-    timeLimit: {
-      type: Number,
-      default: 30,
-      min: 1,
-      max: 180,
-    },
-
-    questions: {
-      type: [questionSchema],
-      default: [],
-    },
-
-    publishedAt: {
-      type: Date,
-      default: Date.now,
-    },
-
-    students: {
-      type: [studentSchema],
-      default: [],
-    },
-  },
-  {
-    timestamps: true,
-  },
-);
-
-const Quiz = mongoose.model("Quiz", quizSchema);
-
-// ============================================================
-// DATABASE CONNECTION
-// ============================================================
-
-let databaseReady = false;
-
-async function connectDatabase() {
-  if (!MONGODB_URI) {
-    console.warn(
-      "WARNING: MONGODB_URI is missing. MongoDB persistence is disabled.",
-    );
-
-    return;
-  }
-
-  try {
-    await mongoose.connect(MONGODB_URI);
-
-    databaseReady = true;
-
-    console.log("MongoDB connected successfully.");
-  } catch (error) {
-    console.error("MongoDB connection failed:");
-    console.error(error.message);
-  }
+function normalizeEnrollment(enrollment) {
+  return String(enrollment || "")
+    .trim()
+    .toUpperCase();
 }
-
-// ============================================================
-// UTILITY - NORMALIZE TEXT
-// ============================================================
 
 function cleanText(value) {
-  if (value === undefined || value === null) {
-    return "";
-  }
-
-  return String(value).trim();
+  return String(value || "").trim();
 }
 
-// ============================================================
-// UTILITY - GENERATE QUIZ CODE
-// ============================================================
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
 
-async function generateQuizCode() {
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, number));
+}
+
+function generateQuizCode() {
   const characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
+  let code = "";
+
+  for (let i = 0; i < 6; i++) {
+    code += characters[crypto.randomInt(0, characters.length)];
+  }
+
+  return code;
+}
+
+async function createUniqueQuizCode() {
   for (let attempt = 0; attempt < 20; attempt++) {
-    let code = "";
+    const code = generateQuizCode();
 
-    for (let i = 0; i < 6; i++) {
-      const index = crypto.randomInt(0, characters.length);
+    const snapshot = await db.collection("quizzes").doc(code).get();
 
-      code += characters[index];
-    }
-
-    const existingQuiz = await Quiz.findOne({ code }).lean();
-
-    if (!existingQuiz) {
+    if (!snapshot.exists) {
       return code;
     }
   }
 
-  throw new Error("Unable to generate a unique quiz code.");
+  throw new Error("Could not generate a unique quiz code.");
 }
 
-// ============================================================
-// UTILITY - EXTRACT JSON FROM AI RESPONSE
-// ============================================================
-
-function extractJson(text) {
-  let cleaned = cleanText(text);
-
-  // Remove Markdown code fences.
-  cleaned = cleaned
-    .replace(/^```json\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/\s*```$/i, "")
-    .trim();
-
-  // Try direct JSON.
-  try {
-    return JSON.parse(cleaned);
-  } catch (error) {
-    // Continue.
+function safeDate(value) {
+  if (!value) {
+    return null;
   }
 
-  // Find first JSON object.
-  const objectStart = cleaned.indexOf("{");
-  const objectEnd = cleaned.lastIndexOf("}");
-
-  if (objectStart !== -1 && objectEnd !== -1) {
-    const objectText = cleaned.slice(objectStart, objectEnd + 1);
-
-    try {
-      return JSON.parse(objectText);
-    } catch (error) {
-      // Continue.
-    }
+  if (value instanceof admin.firestore.Timestamp) {
+    return value.toDate();
   }
 
-  // Find first JSON array.
-  const arrayStart = cleaned.indexOf("[");
-  const arrayEnd = cleaned.lastIndexOf("]");
-
-  if (arrayStart !== -1 && arrayEnd !== -1) {
-    const arrayText = cleaned.slice(arrayStart, arrayEnd + 1);
-
-    try {
-      return JSON.parse(arrayText);
-    } catch (error) {
-      // Continue.
-    }
+  if (value instanceof Date) {
+    return value;
   }
 
-  throw new Error("AI returned invalid JSON.");
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date;
 }
 
-// ============================================================
-// UTILITY - NORMALIZE QUESTION
-// ============================================================
+function serializeTimestamp(value) {
+  const date = safeDate(value);
 
-function normalizeQuestion(
-  question,
-  index = 0,
-  fallbackDifficulty = "moderate",
-) {
-  if (!question) {
-    throw new Error(`Question ${index + 1} is empty.`);
-  }
+  return date ? date.toISOString() : null;
+}
 
+function sanitizeQuestionForStudent(question, index) {
+  return {
+    id: question.id ?? index + 1,
+
+    question: cleanText(question.question),
+
+    options: Array.isArray(question.options)
+      ? question.options.map((option) => cleanText(option))
+      : [],
+
+    difficulty: question.difficulty || "moderate",
+
+    marks: Number(question.marks || 1),
+
+    source: question.source || "ai",
+
+    excluded: false,
+  };
+}
+
+function sanitizeQuizForStudent(quiz) {
+  return {
+    code: quiz.code,
+
+    title: quiz.title || "Advance's Quiz",
+
+    totalQuestions: quiz.totalQuestions || quiz.questions.length,
+
+    totalMarks: quiz.totalMarks || 0,
+
+    marksPerQuestion: quiz.marksPerQuestion || 0,
+
+    difficulty: quiz.difficulty || "mixed",
+
+    timeLimit: Number(quiz.timeLimit || DEFAULT_QUIZ_TIME),
+
+    questions: quiz.questions.map(sanitizeQuestionForStudent),
+  };
+}
+
+function normalizeQuestion(question, index, defaults = {}) {
   const options = Array.isArray(question.options)
-    ? question.options.map((option) => cleanText(option))
+    ? question.options.slice(0, 4).map((option) => cleanText(option))
     : [];
 
-  if (options.length !== 4) {
-    throw new Error(`Question ${index + 1} must contain exactly four options.`);
+  while (options.length < 4) {
+    options.push("");
   }
 
   let correctAnswer = Number(question.correctAnswer);
-
-  // Support AI returning A/B/C/D.
-  if (
-    typeof question.correctAnswer === "string" &&
-    /^[ABCD]$/i.test(question.correctAnswer.trim())
-  ) {
-    correctAnswer =
-      question.correctAnswer.trim().toUpperCase().charCodeAt(0) - 65;
-  }
 
   if (
     !Number.isInteger(correctAnswer) ||
     correctAnswer < 0 ||
     correctAnswer > 3
   ) {
-    throw new Error(`Question ${index + 1} has an invalid correctAnswer.`);
+    correctAnswer = 0;
   }
 
-  const difficulty = ["easy", "moderate", "hard"].includes(
-    String(question.difficulty || "").toLowerCase(),
-  )
-    ? String(question.difficulty).toLowerCase()
-    : fallbackDifficulty;
+  const difficulty = question.difficulty || defaults.difficulty || "moderate";
+
+  const marks = Number(question.marks || defaults.marks || 1);
 
   return {
-    id:
-      question.id !== undefined && question.id !== null
-        ? question.id
-        : index + 1,
+    id: question.id ?? index + 1,
 
     question: cleanText(question.question),
 
@@ -453,162 +298,143 @@ function normalizeQuestion(
 
     difficulty,
 
-    marks: Math.max(1, Number(question.marks) || 1),
+    marks: Number.isFinite(marks) && marks > 0 ? marks : 1,
 
     excluded: Boolean(question.excluded),
 
-    source: question.source === "manual" ? "manual" : "ai",
+    source: question.source || defaults.source || "ai",
   };
 }
 
 // ============================================================
-// UTILITY - GET ACTIVE QUESTIONS
+// GEMINI JSON EXTRACTION
 // ============================================================
 
-function getActiveQuestions(quiz) {
-  return (quiz.questions || []).filter((question) => !question.excluded);
+function extractJson(text) {
+  if (!text) {
+    throw new Error("AI returned an empty response.");
+  }
+
+  let cleaned = String(text).trim();
+
+  // Remove markdown code fences.
+  cleaned = cleaned
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  // Direct JSON.
+  try {
+    return JSON.parse(cleaned);
+  } catch (_) {}
+
+  // Find JSON object.
+  const objectStart = cleaned.indexOf("{");
+  const objectEnd = cleaned.lastIndexOf("}");
+
+  if (objectStart !== -1 && objectEnd !== -1) {
+    const objectText = cleaned.slice(objectStart, objectEnd + 1);
+
+    try {
+      return JSON.parse(objectText);
+    } catch (_) {}
+  }
+
+  // Find JSON array.
+  const arrayStart = cleaned.indexOf("[");
+  const arrayEnd = cleaned.lastIndexOf("]");
+
+  if (arrayStart !== -1 && arrayEnd !== -1) {
+    const arrayText = cleaned.slice(arrayStart, arrayEnd + 1);
+
+    try {
+      return JSON.parse(arrayText);
+    } catch (_) {}
+  }
+
+  throw new Error("AI returned invalid JSON.");
 }
 
 // ============================================================
-// UTILITY - TOTAL MARKS
+// GEMINI CALL
 // ============================================================
 
-function calculateTotalMarks(questions) {
-  return questions.reduce((total, question) => {
-    return total + Number(question.marks || 0);
-  }, 0);
-}
+async function askGemini(prompt) {
+  if (!genAI) {
+    throw new Error("GEMINI_API_KEY is not configured on the server.");
+  }
 
-// ============================================================
-// UTILITY - FIND STUDENT
-// ============================================================
+  const modelName = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-function findStudent(quiz, enrollment) {
-  const cleanEnrollment = cleanText(enrollment).toUpperCase();
-
-  return quiz.students.find(
-    (student) => String(student.enrollment).toUpperCase() === cleanEnrollment,
-  );
-}
-
-// ============================================================
-// UTILITY - BUILD RESULT
-// ============================================================
-
-function calculateResult(quiz, student) {
-  const questions = quiz.questions || [];
-
-  const answers = student.answers || {};
-
-  let score = 0;
-
-  let totalMarks = 0;
-
-  const review = [];
-
-  questions.forEach((question, index) => {
-    const marks = Number(question.marks || 0);
-
-    totalMarks += marks;
-
-    const rawAnswer = answers[index];
-
-    const studentAnswer =
-      rawAnswer === undefined || rawAnswer === null || rawAnswer === ""
-        ? null
-        : Number(rawAnswer);
-
-    const isCorrect =
-      studentAnswer !== null &&
-      Number.isInteger(studentAnswer) &&
-      studentAnswer === Number(question.correctAnswer);
-
-    if (isCorrect) {
-      score += marks;
-    }
-
-    review.push({
-      question: question.question,
-
-      options: question.options,
-
-      correctAnswer: Number(question.correctAnswer),
-
-      studentAnswer,
-
-      isCorrect,
-
-      explanation: question.explanation || "",
-    });
+  const model = genAI.getGenerativeModel({
+    model: modelName,
   });
 
-  const percentage =
-    totalMarks > 0 ? Number(((score / totalMarks) * 100).toFixed(2)) : 0;
+  const result = await model.generateContent(prompt);
 
-  return {
-    score,
+  const response = result.response;
 
-    totalMarks,
+  const text = response.text();
 
-    percentage,
-
-    review,
-  };
+  return text;
 }
 
 // ============================================================
-// HEALTH CHECK
+// HEALTH
 // ============================================================
 
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    message: "Advance's Quiz API is running.",
-    database: databaseReady ? "connected" : "not connected",
-    ai: model ? "configured" : "not configured",
-    time: new Date().toISOString(),
+    message: "Advance's Quiz server is running.",
+    database: "Firebase Firestore",
+    ai: process.env.GEMINI_API_KEY ? "configured" : "missing",
   });
 });
 
-app.get("/health", (req, res) => {
-  res.json({
-    success: true,
-    status: "healthy",
-    database: databaseReady,
-    ai: Boolean(model),
-  });
+app.get("/health", async (req, res) => {
+  try {
+    await db.collection("quizzes").limit(1).get();
+
+    res.json({
+      success: true,
+      server: "online",
+      firebase: "connected",
+      gemini: process.env.GEMINI_API_KEY ? "configured" : "missing",
+      time: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Firebase connection failed.",
+      details: error.message,
+    });
+  }
 });
 
 // ============================================================
-// GENERATE QUIZ WITH AI
+// GENERATE QUIZ
+// POST /generate-quiz
 // ============================================================
 
 app.post("/generate-quiz", upload.single("pdf"), async (req, res) => {
   try {
-    if (!model) {
-      return res.status(500).json({
-        success: false,
-        error:
-          "Gemini API is not configured. Add GEMINI_API_KEY to the server environment variables.",
-      });
-    }
-
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        error: "Please upload a PDF file.",
+        error: "Please upload a PDF.",
       });
     }
 
-    const numberOfQuestions = Math.min(
+    const numberOfQuestions = clampNumber(
+      req.body.numberOfQuestions,
+      1,
       50,
-      Math.max(1, Number(req.body.numberOfQuestions) || 10),
+      10,
     );
 
-    const marksPerQuestion = Math.min(
-      20,
-      Math.max(1, Number(req.body.marksPerQuestion) || 2),
-    );
+    const marksPerQuestion = clampNumber(req.body.marksPerQuestion, 1, 20, 2);
 
     const difficulty = ["easy", "moderate", "hard"].includes(
       String(req.body.difficulty || "").toLowerCase(),
@@ -616,77 +442,82 @@ app.post("/generate-quiz", upload.single("pdf"), async (req, res) => {
       ? String(req.body.difficulty).toLowerCase()
       : "moderate";
 
-    const timeLimit = Math.min(
-      180,
-      Math.max(1, Number(req.body.timeLimit) || 30),
+    const timeLimit = clampNumber(
+      req.body.timeLimit,
+      1,
+      MAX_QUIZ_TIME,
+      DEFAULT_QUIZ_TIME,
     );
 
-    console.log(`Generating ${numberOfQuestions} ${difficulty} questions...`);
+    console.log(
+      `Generating ${numberOfQuestions} questions | ${difficulty} | ${timeLimit} minutes`,
+    );
 
-    // ========================================================
-    // EXTRACT PDF TEXT
-    // ========================================================
+    // --------------------------------------------------------
+    // READ PDF
+    // --------------------------------------------------------
 
     const pdfData = await pdfParse(req.file.buffer);
 
-    const pdfText = cleanText(pdfData.text);
+    let pdfText = cleanText(pdfData.text);
 
     if (!pdfText) {
       return res.status(400).json({
         success: false,
         error:
-          "Could not extract text from this PDF. Please upload a text-based PDF.",
+          "Could not extract text from this PDF. The PDF may be scanned/image-only.",
       });
     }
 
-    // Protect AI request from extremely large PDFs.
-    const MAX_TEXT_LENGTH = 90000;
+    // Avoid sending an enormous document to Gemini.
+    const MAX_PDF_TEXT = 120000;
 
-    const studyMaterial =
-      pdfText.length > MAX_TEXT_LENGTH
-        ? pdfText.slice(0, MAX_TEXT_LENGTH)
-        : pdfText;
+    if (pdfText.length > MAX_PDF_TEXT) {
+      pdfText = pdfText.slice(0, MAX_PDF_TEXT);
+    }
 
-    // ========================================================
+    // --------------------------------------------------------
     // GEMINI PROMPT
-    // ========================================================
+    // --------------------------------------------------------
 
     const prompt = `
 You are an expert college-level examination question generator.
 
-Create exactly ${numberOfQuestions} multiple-choice questions from the study material below.
+Create exactly ${numberOfQuestions} high-quality multiple-choice questions
+from the study material provided below.
 
-Requirements:
+REQUIREMENTS:
 
-1. Every question MUST be based only on the supplied study material.
-2. Difficulty must be "${difficulty}".
-3. Each question must have exactly 4 options.
-4. Only one option may be correct.
-5. correctAnswer MUST be a zero-based integer:
-   0 = option A
-   1 = option B
-   2 = option C
-   3 = option D
-6. Questions should test actual understanding, not random trivia.
+1. Difficulty: ${difficulty}
+2. Each question must have exactly 4 options.
+3. Only ONE option must be correct.
+4. correctAnswer must be a zero-based integer:
+   - 0 = option A
+   - 1 = option B
+   - 2 = option C
+   - 3 = option D
+5. Every question must be answerable from the provided study material.
+6. Do not create questions from information not contained in the material.
 7. Avoid duplicate or nearly duplicate questions.
-8. Include a short explanation for every correct answer.
-9. Use marks = ${marksPerQuestion}.
-10. Return ONLY valid JSON.
-11. Do not use Markdown.
-12. Do not include any text before or after the JSON.
+8. Questions should test understanding, not just meaningless memorization.
+9. Use clear college-level English.
+10. Include a concise explanation for the correct answer.
+11. Marks for every question: ${marksPerQuestion}.
+12. Difficulty for every question: ${difficulty}.
+13. Return ONLY valid JSON.
+14. Do NOT use markdown.
+15. Do NOT put JSON inside code fences.
 
-Return exactly this structure:
+RETURN EXACTLY THIS STRUCTURE:
 
 {
   "success": true,
-  "title": "Advance's Quiz",
   "totalQuestions": ${numberOfQuestions},
   "marksPerQuestion": ${marksPerQuestion},
   "totalMarks": ${numberOfQuestions * marksPerQuestion},
   "difficulty": "${difficulty}",
   "questions": [
     {
-      "id": 1,
       "question": "Question text",
       "options": [
         "Option A",
@@ -695,7 +526,7 @@ Return exactly this structure:
         "Option D"
       ],
       "correctAnswer": 0,
-      "explanation": "Short explanation",
+      "explanation": "Why this answer is correct.",
       "difficulty": "${difficulty}",
       "marks": ${marksPerQuestion}
     }
@@ -704,58 +535,55 @@ Return exactly this structure:
 
 STUDY MATERIAL:
 
-${studyMaterial}
+${pdfText}
 `;
 
-    // ========================================================
-    // GEMINI REQUEST
-    // ========================================================
+    const aiText = await askGemini(prompt);
 
-    const result = await model.generateContent(prompt);
+    const parsed = extractJson(aiText);
 
-    const response = result.response;
-
-    const text = response.text();
-
-    const parsed = extractJson(text);
-
-    if (!parsed || !Array.isArray(parsed.questions)) {
-      throw new Error("AI did not return a valid questions array.");
+    if (
+      !parsed ||
+      !Array.isArray(parsed.questions) ||
+      parsed.questions.length === 0
+    ) {
+      throw new Error("AI did not return a valid question list.");
     }
-
-    // ========================================================
-    // NORMALIZE QUESTIONS
-    // ========================================================
 
     const questions = parsed.questions
       .slice(0, numberOfQuestions)
-      .map((question, index) => normalizeQuestion(question, index, difficulty));
+      .map((question, index) =>
+        normalizeQuestion(question, index, {
+          difficulty,
+          marks: marksPerQuestion,
+          source: "ai",
+        }),
+      );
 
-    if (questions.length === 0) {
-      throw new Error("AI generated zero questions.");
+    // Validate questions.
+    for (const question of questions) {
+      if (!question.question) {
+        throw new Error("AI generated an empty question.");
+      }
+
+      if (question.options.some((option) => !option)) {
+        throw new Error("AI generated a question with an empty option.");
+      }
     }
 
-    // Make sure every question uses requested marks.
-    questions.forEach((question) => {
-      question.marks = marksPerQuestion;
-      question.source = "ai";
-      question.excluded = false;
-    });
-
-    // ========================================================
-    // RESPONSE
-    // ========================================================
+    const totalMarks = questions.reduce(
+      (total, question) => total + Number(question.marks || marksPerQuestion),
+      0,
+    );
 
     return res.json({
       success: true,
-
-      title: parsed.title || "Advance's Quiz",
 
       totalQuestions: questions.length,
 
       marksPerQuestion,
 
-      totalMarks: calculateTotalMarks(questions),
+      totalMarks,
 
       difficulty,
 
@@ -765,30 +593,22 @@ ${studyMaterial}
     });
   } catch (error) {
     console.error("GENERATE QUIZ ERROR:");
-
     console.error(error);
 
     return res.status(500).json({
       success: false,
-
       error: error.message || "Something went wrong while generating the quiz.",
     });
   }
 });
 
 // ============================================================
-// REGENERATE SINGLE QUESTION
+// REGENERATE QUESTION
+// POST /regenerate-question
 // ============================================================
 
 app.post("/regenerate-question", async (req, res) => {
   try {
-    if (!model) {
-      return res.status(500).json({
-        success: false,
-        error: "Gemini API is not configured.",
-      });
-    }
-
     const difficulty = ["easy", "moderate", "hard"].includes(
       String(req.body.difficulty || "").toLowerCase(),
     )
@@ -805,17 +625,26 @@ app.post("/regenerate-question", async (req, res) => {
     }
 
     const prompt = `
-Generate ONE new college-level MCQ.
+Generate ONE new college-level multiple-choice question.
 
 Difficulty: ${difficulty}
 
-The new question must NOT be the same as this previous question:
-
+Previous question:
 "${previousQuestion}"
 
-Return ONLY valid JSON.
+Requirements:
 
-Required structure:
+- The new question must be different from the previous question.
+- Exactly 4 options.
+- Exactly one correct answer.
+- correctAnswer must be zero-based.
+- Include an explanation.
+- Do not repeat the previous question.
+- Return ONLY valid JSON.
+- No markdown.
+- No code fences.
+
+Return exactly:
 
 {
   "question": "Question text",
@@ -826,39 +655,46 @@ Required structure:
     "Option D"
   ],
   "correctAnswer": 0,
-  "explanation": "Short explanation",
+  "explanation": "Explanation",
   "difficulty": "${difficulty}"
 }
-
-Rules:
-
-- Exactly 4 options.
-- Only one correct answer.
-- correctAnswer must be 0, 1, 2, or 3.
-- Make the question meaningfully different.
-- No Markdown.
-- No text outside JSON.
 `;
 
-    const result = await model.generateContent(prompt);
+    const aiText = await askGemini(prompt);
 
-    const text = result.response.text();
+    const parsed = extractJson(aiText);
 
-    const parsed = extractJson(text);
+    const question = normalizeQuestion(parsed, 0, {
+      difficulty,
+      source: "ai",
+      marks: 1,
+    });
 
-    const question = normalizeQuestion(parsed, 0, difficulty);
+    if (!question.question) {
+      throw new Error("AI generated an empty question.");
+    }
 
-    question.source = "ai";
-
-    question.excluded = false;
+    if (question.options.some((option) => !option)) {
+      throw new Error("AI generated an invalid question.");
+    }
 
     return res.json({
       success: true,
-      question,
+
+      question: {
+        question: question.question,
+
+        options: question.options,
+
+        correctAnswer: question.correctAnswer,
+
+        explanation: question.explanation,
+
+        difficulty: question.difficulty,
+      },
     });
   } catch (error) {
     console.error("REGENERATE QUESTION ERROR:");
-
     console.error(error);
 
     return res.status(500).json({
@@ -870,24 +706,17 @@ Rules:
 
 // ============================================================
 // PUBLISH QUIZ
+// POST /publish-quiz
 // ============================================================
 
 app.post("/publish-quiz", async (req, res) => {
   try {
-    if (!databaseReady) {
-      return res.status(500).json({
-        success: false,
-        error:
-          "Database is not connected. Please configure MONGODB_URI on Render.",
-      });
-    }
-
     const incomingQuiz = req.body.quiz;
 
     if (!incomingQuiz) {
       return res.status(400).json({
         success: false,
-        error: "Quiz data is missing.",
+        error: "Quiz data is required.",
       });
     }
 
@@ -901,20 +730,14 @@ app.post("/publish-quiz", async (req, res) => {
       });
     }
 
-    // ========================================================
-    // NORMALIZE
-    // ========================================================
-
-    const questions = incomingQuiz.questions.map((question, index) => {
-      return normalizeQuestion(
-        question,
-        index,
-        question.difficulty || "moderate",
+    const activeQuestions = incomingQuiz.questions
+      .filter((question) => !question.excluded)
+      .map((question, index) =>
+        normalizeQuestion(question, index, {
+          marks: incomingQuiz.marksPerQuestion || 1,
+          difficulty: incomingQuiz.difficulty || "moderate",
+        }),
       );
-    });
-
-    // Only active questions should be published.
-    const activeQuestions = questions.filter((question) => !question.excluded);
 
     if (activeQuestions.length === 0) {
       return res.status(400).json({
@@ -923,37 +746,30 @@ app.post("/publish-quiz", async (req, res) => {
       });
     }
 
-    // ========================================================
-    // TIME LIMIT
-    // ========================================================
-
-    const timeLimit = Math.min(
-      180,
-      Math.max(1, Number(incomingQuiz.timeLimit) || 30),
+    const timeLimit = clampNumber(
+      incomingQuiz.timeLimit,
+      1,
+      MAX_QUIZ_TIME,
+      DEFAULT_QUIZ_TIME,
     );
 
-    // ========================================================
-    // GENERATE CODE
-    // ========================================================
+    const totalMarks = activeQuestions.reduce(
+      (total, question) => total + Number(question.marks || 1),
+      0,
+    );
 
-    const code = await generateQuizCode();
+    const code = await createUniqueQuizCode();
 
-    // ========================================================
-    // CREATE QUIZ
-    // ========================================================
-
-    const quiz = new Quiz({
+    const quiz = {
       code,
 
       title: incomingQuiz.title || "Advance's Quiz",
 
-      success: true,
-
       totalQuestions: activeQuestions.length,
 
-      marksPerQuestion: Number(incomingQuiz.marksPerQuestion) || 0,
+      marksPerQuestion: incomingQuiz.marksPerQuestion || 0,
 
-      totalMarks: calculateTotalMarks(activeQuestions),
+      totalMarks,
 
       difficulty: incomingQuiz.difficulty || "mixed",
 
@@ -961,14 +777,18 @@ app.post("/publish-quiz", async (req, res) => {
 
       questions: activeQuestions,
 
-      students: [],
-    });
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
 
-    await quiz.save();
+      publishedAt: admin.firestore.FieldValue.serverTimestamp(),
 
-    console.log(
-      `QUIZ PUBLISHED: ${code} | ${activeQuestions.length} questions | ${timeLimit} minutes`,
-    );
+      status: "published",
+
+      studentCount: 0,
+    };
+
+    await db.collection("quizzes").doc(code).set(quiz);
+
+    console.log(`QUIZ PUBLISHED: ${code}`);
 
     return res.json({
       success: true,
@@ -976,26 +796,17 @@ app.post("/publish-quiz", async (req, res) => {
       code,
 
       quiz: {
-        code: quiz.code,
+        code,
 
-        title: quiz.title,
+        totalQuestions: activeQuestions.length,
 
-        totalQuestions: quiz.totalQuestions,
+        totalMarks,
 
-        marksPerQuestion: quiz.marksPerQuestion,
-
-        totalMarks: quiz.totalMarks,
-
-        difficulty: quiz.difficulty,
-
-        timeLimit: quiz.timeLimit,
-
-        questions: quiz.questions,
+        timeLimit,
       },
     });
   } catch (error) {
     console.error("PUBLISH QUIZ ERROR:");
-
     console.error(error);
 
     return res.status(500).json({
@@ -1006,23 +817,111 @@ app.post("/publish-quiz", async (req, res) => {
 });
 
 // ============================================================
-// STUDENT JOIN QUIZ
+// GET QUIZ
+// GET /quiz/:code
+//
+// IMPORTANT:
+// Correct answers are NEVER sent to students.
+// ============================================================
+
+app.get("/quiz/:code", async (req, res) => {
+  try {
+    const code = normalizeCode(req.params.code);
+
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        error: "Quiz code is required.",
+      });
+    }
+
+    const quizSnapshot = await db.collection("quizzes").doc(code).get();
+
+    if (!quizSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Quiz not found.",
+      });
+    }
+
+    const quiz = {
+      id: quizSnapshot.id,
+      ...quizSnapshot.data(),
+    };
+
+    if (quiz.status !== "published") {
+      return res.status(404).json({
+        success: false,
+        error: "This quiz is not available.",
+      });
+    }
+
+    const studentQuiz = sanitizeQuizForStudent(quiz);
+
+    return res.json({
+      success: true,
+      quiz: studentQuiz,
+    });
+  } catch (error) {
+    console.error("GET QUIZ ERROR:");
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to load quiz.",
+    });
+  }
+});
+
+// ============================================================
+// STUDENT COUNT
+// GET /quiz/:code/student-count
+// ============================================================
+
+app.get("/quiz/:code/student-count", async (req, res) => {
+  try {
+    const code = normalizeCode(req.params.code);
+
+    const quizRef = db.collection("quizzes").doc(code);
+
+    const quizSnapshot = await quizRef.get();
+
+    if (!quizSnapshot.exists) {
+      return res.status(404).json({
+        success: false,
+        error: "Quiz not found.",
+      });
+    }
+
+    const studentsSnapshot = await quizRef.collection("students").get();
+
+    return res.json({
+      success: true,
+
+      totalStudents: studentsSnapshot.size,
+    });
+  } catch (error) {
+    console.error("STUDENT COUNT ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch student count.",
+    });
+  }
+});
+
+// ============================================================
+// JOIN QUIZ
+// POST /quiz/:code/join
 // ============================================================
 
 app.post("/quiz/:code/join", async (req, res) => {
   try {
-    if (!databaseReady) {
-      return res.status(500).json({
-        success: false,
-        error: "Database is not connected.",
-      });
-    }
-
-    const code = cleanText(req.params.code).toUpperCase();
+    const code = normalizeCode(req.params.code);
 
     const studentName = cleanText(req.body.studentName);
 
-    const enrollment = cleanText(req.body.enrollment).toUpperCase();
+    const enrollment = normalizeEnrollment(req.body.enrollment);
 
     if (!studentName) {
       return res.status(400).json({
@@ -1038,99 +937,130 @@ app.post("/quiz/:code/join", async (req, res) => {
       });
     }
 
-    // ========================================================
-    // FIND QUIZ
-    // ========================================================
+    const quizRef = db.collection("quizzes").doc(code);
 
-    const quiz = await Quiz.findOne({
-      code,
-    });
+    const quizSnapshot = await quizRef.get();
 
-    if (!quiz) {
+    if (!quizSnapshot.exists) {
       return res.status(404).json({
         success: false,
-        error: "Quiz not found. Please check the quiz code.",
+        error: "Quiz not found.",
       });
     }
 
-    // ========================================================
-    // DUPLICATE ENROLLMENT
-    // ========================================================
+    const quiz = quizSnapshot.data();
 
-    const existingStudent = findStudent(quiz, enrollment);
+    if (quiz.status !== "published") {
+      return res.status(400).json({
+        success: false,
+        error: "Quiz is not active.",
+      });
+    }
 
-    if (existingStudent) {
-      if (existingStudent.submitted) {
-        return res.status(400).json({
+    // --------------------------------------------------------
+    // STUDENT DOCUMENT
+    // --------------------------------------------------------
+
+    const studentRef = quizRef.collection("students").doc(enrollment);
+
+    const existingSnapshot = await studentRef.get();
+
+    const now = new Date();
+
+    // --------------------------------------------------------
+    // IF ALREADY JOINED
+    // --------------------------------------------------------
+
+    if (existingSnapshot.exists) {
+      const existing = existingSnapshot.data();
+
+      if (existing.submitted) {
+        return res.status(409).json({
           success: false,
           error: "This enrollment number has already submitted this quiz.",
         });
       }
 
-      return res.status(400).json({
-        success: false,
-        error: "This enrollment number has already joined this quiz.",
-      });
+      const existingExpiry = safeDate(existing.expiresAt);
+
+      if (existingExpiry && existingExpiry.getTime() > now.getTime()) {
+        return res.json({
+          success: true,
+
+          message: "Student already joined this quiz.",
+
+          student: {
+            studentName: existing.studentName,
+
+            enrollment: existing.enrollment,
+
+            joinedAt: serializeTimestamp(existing.joinedAt),
+
+            expiresAt: serializeTimestamp(existing.expiresAt),
+          },
+        });
+      }
+
+      // Existing attempt expired.
+      // Create a fresh attempt.
     }
 
-    // ========================================================
-    // CALCULATE SERVER EXPIRATION
-    // ========================================================
+    // --------------------------------------------------------
+    // SERVER-CONTROLLED EXPIRATION
+    // --------------------------------------------------------
 
-    const now = Date.now();
+    const timeLimit = clampNumber(
+      quiz.timeLimit,
+      1,
+      MAX_QUIZ_TIME,
+      DEFAULT_QUIZ_TIME,
+    );
 
-    const expiresAt = new Date(now + Number(quiz.timeLimit || 30) * 60 * 1000);
+    const expiresAt = new Date(now.getTime() + timeLimit * 60 * 1000);
 
-    // ========================================================
-    // ADD STUDENT
-    // ========================================================
-
-    quiz.students.push({
+    const studentData = {
       studentName,
 
       enrollment,
 
-      joinedAt: new Date(now),
+      quizCode: code,
 
-      expiresAt,
+      joinedAt: admin.firestore.Timestamp.fromDate(now),
 
-      submittedAt: null,
+      expiresAt: admin.firestore.Timestamp.fromDate(expiresAt),
 
       submitted: false,
 
-      answers: {},
+      submittedAt: null,
 
-      result: null,
-    });
+      score: null,
 
-    await quiz.save();
+      totalMarks: Number(quiz.totalMarks || 0),
 
-    // Get newly created student.
-    const student = quiz.students[quiz.students.length - 1];
+      percentage: null,
+    };
 
-    console.log(
-      `STUDENT JOINED: ${studentName} | ${enrollment} | QUIZ ${code}`,
-    );
+    await studentRef.set(studentData);
+
+    console.log(`STUDENT JOINED: ${studentName} | ${enrollment} | ${code}`);
 
     return res.json({
       success: true,
 
+      message: "Quiz joined successfully.",
+
       student: {
-        id: student._id,
+        studentName,
 
-        studentName: student.studentName,
+        enrollment,
 
-        enrollment: student.enrollment,
+        joinedAt: now.toISOString(),
 
-        joinedAt: student.joinedAt,
-
-        expiresAt: student.expiresAt,
+        expiresAt: expiresAt.toISOString(),
       },
     });
   } catch (error) {
-    console.error("JOIN QUIZ ERROR:");
-
-    console.error(error);
+    console.error("JOIN QUIZ ERROR:", error);
 
     return res.status(500).json({
       success: false,
@@ -1140,157 +1070,17 @@ app.post("/quiz/:code/join", async (req, res) => {
 });
 
 // ============================================================
-// GET QUIZ
-// ============================================================
-
-app.get("/quiz/:code", async (req, res) => {
-  try {
-    if (!databaseReady) {
-      return res.status(500).json({
-        success: false,
-        error: "Database is not connected.",
-      });
-    }
-
-    const code = cleanText(req.params.code).toUpperCase();
-
-    const quiz = await Quiz.findOne({
-      code,
-    }).lean();
-
-    if (!quiz) {
-      return res.status(404).json({
-        success: false,
-        error: "Quiz not found.",
-      });
-    }
-
-    // ========================================================
-    // NEVER SEND STUDENT PRIVATE DATA
-    // ========================================================
-
-    const safeQuiz = {
-      code: quiz.code,
-
-      title: quiz.title,
-
-      success: quiz.success,
-
-      totalQuestions: quiz.totalQuestions,
-
-      marksPerQuestion: quiz.marksPerQuestion,
-
-      totalMarks: quiz.totalMarks,
-
-      difficulty: quiz.difficulty,
-
-      timeLimit: quiz.timeLimit,
-
-      questions: quiz.questions.map((question) => ({
-        id: question.id,
-
-        question: question.question,
-
-        options: question.options,
-
-        correctAnswer: question.correctAnswer,
-
-        explanation: question.explanation,
-
-        difficulty: question.difficulty,
-
-        marks: question.marks,
-
-        excluded: question.excluded,
-
-        source: question.source,
-      })),
-    };
-
-    return res.json({
-      success: true,
-      quiz: safeQuiz,
-    });
-  } catch (error) {
-    console.error("GET QUIZ ERROR:");
-
-    console.error(error);
-
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Failed to load quiz.",
-    });
-  }
-});
-
-// ============================================================
-// STUDENT COUNT
-// ============================================================
-
-app.get("/quiz/:code/student-count", async (req, res) => {
-  try {
-    if (!databaseReady) {
-      return res.status(500).json({
-        success: false,
-        error: "Database is not connected.",
-      });
-    }
-
-    const code = cleanText(req.params.code).toUpperCase();
-
-    const quiz = await Quiz.findOne({
-      code,
-    }).lean();
-
-    if (!quiz) {
-      return res.status(404).json({
-        success: false,
-        error: "Quiz not found.",
-      });
-    }
-
-    const totalStudents = Array.isArray(quiz.students)
-      ? quiz.students.length
-      : 0;
-
-    return res.json({
-      success: true,
-
-      totalStudents,
-    });
-  } catch (error) {
-    console.error("STUDENT COUNT ERROR:");
-
-    console.error(error);
-
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Failed to get student count.",
-    });
-  }
-});
-
-// ============================================================
 // SUBMIT QUIZ
+// POST /quiz/:code/submit
 // ============================================================
 
 app.post("/quiz/:code/submit", async (req, res) => {
   try {
-    if (!databaseReady) {
-      return res.status(500).json({
-        success: false,
-        error: "Database is not connected.",
-      });
-    }
+    const code = normalizeCode(req.params.code);
 
-    const code = cleanText(req.params.code).toUpperCase();
+    const enrollment = normalizeEnrollment(req.body.enrollment);
 
-    const enrollment = cleanText(req.body.enrollment).toUpperCase();
-
-    const answers =
-      req.body.answers && typeof req.body.answers === "object"
-        ? req.body.answers
-        : {};
+    const answers = req.body.answers || {};
 
     if (!enrollment) {
       return res.status(400).json({
@@ -1299,92 +1089,141 @@ app.post("/quiz/:code/submit", async (req, res) => {
       });
     }
 
-    // ========================================================
-    // FIND QUIZ
-    // ========================================================
+    const quizRef = db.collection("quizzes").doc(code);
 
-    const quiz = await Quiz.findOne({
-      code,
-    });
+    const quizSnapshot = await quizRef.get();
 
-    if (!quiz) {
+    if (!quizSnapshot.exists) {
       return res.status(404).json({
         success: false,
         error: "Quiz not found.",
       });
     }
 
-    // ========================================================
-    // FIND STUDENT
-    // ========================================================
+    const quiz = quizSnapshot.data();
 
-    const student = findStudent(quiz, enrollment);
+    const studentRef = quizRef.collection("students").doc(enrollment);
 
-    if (!student) {
+    const studentSnapshot = await studentRef.get();
+
+    if (!studentSnapshot.exists) {
       return res.status(404).json({
         success: false,
         error: "Student attempt not found. Please join the quiz first.",
       });
     }
 
-    // ========================================================
-    // ALREADY SUBMITTED
-    // ========================================================
+    const student = studentSnapshot.data();
+
+    // --------------------------------------------------------
+    // PREVENT DOUBLE SUBMISSION
+    // --------------------------------------------------------
 
     if (student.submitted) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         error: "This quiz has already been submitted.",
       });
     }
 
-    // ========================================================
-    // SERVER TIMER CHECK
-    // ========================================================
+    // --------------------------------------------------------
+    // CHECK SERVER EXPIRATION
+    // --------------------------------------------------------
 
-    const now = Date.now();
+    const expiresAt = safeDate(student.expiresAt);
 
-    const expiresAt = new Date(student.expiresAt).getTime();
+    const now = new Date();
 
-    const expired = now > expiresAt;
+    if (!expiresAt || now.getTime() > expiresAt.getTime()) {
+      return res.status(408).json({
+        success: false,
+        error: "Quiz time has expired. The submission was not accepted.",
+      });
+    }
 
-    // We still calculate the submitted answers.
-    // If expired, the attempt is marked as automatically submitted.
-    // This is important because the frontend timer cannot be trusted
-    // by itself.
-    // ========================================================
+    // --------------------------------------------------------
+    // CALCULATE SCORE ON SERVER
+    // --------------------------------------------------------
 
-    student.answers = answers;
+    let score = 0;
 
-    student.submitted = true;
+    let totalMarks = 0;
 
-    student.submittedAt = new Date(now);
+    const review = [];
 
-    // ========================================================
-    // CALCULATE SCORE
-    // ========================================================
+    quiz.questions.forEach((question, index) => {
+      const marks = Number(question.marks || quiz.marksPerQuestion || 1);
 
-    const result = calculateResult(quiz, student);
+      totalMarks += marks;
 
-    student.result = result;
+      const studentAnswer = Object.prototype.hasOwnProperty.call(answers, index)
+        ? Number(answers[index])
+        : null;
 
-    await quiz.save();
+      const correctAnswer = Number(question.correctAnswer);
+
+      const isCorrect =
+        Number.isInteger(studentAnswer) && studentAnswer === correctAnswer;
+
+      if (isCorrect) {
+        score += marks;
+      }
+
+      review.push({
+        question: question.question,
+
+        options: question.options,
+
+        correctAnswer,
+
+        studentAnswer,
+
+        explanation: question.explanation || "",
+
+        marks,
+
+        isCorrect,
+      });
+    });
+
+    const percentage =
+      totalMarks > 0 ? Number(((score / totalMarks) * 100).toFixed(2)) : 0;
+
+    // --------------------------------------------------------
+    // SAVE RESULT
+    // --------------------------------------------------------
+
+    await studentRef.update({
+      submitted: true,
+
+      submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+
+      score,
+
+      totalMarks,
+
+      percentage,
+    });
 
     console.log(
-      `${expired ? "AUTO" : "NORMAL"} SUBMISSION: ${enrollment} | QUIZ ${code} | SCORE ${result.score}/${result.totalMarks}`,
+      `QUIZ SUBMITTED: ${enrollment} | ${code} | ${score}/${totalMarks}`,
     );
 
     return res.json({
       success: true,
 
-      expired,
+      result: {
+        score,
 
-      result,
+        totalMarks,
+
+        percentage,
+
+        review,
+      },
     });
   } catch (error) {
-    console.error("SUBMIT QUIZ ERROR:");
-
-    console.error(error);
+    console.error("SUBMIT QUIZ ERROR:", error);
 
     return res.status(500).json({
       success: false,
@@ -1394,78 +1233,47 @@ app.post("/quiz/:code/submit", async (req, res) => {
 });
 
 // ============================================================
-// DELETE QUIZ
-// Optional admin/debug endpoint
+// MULTER / GENERAL ERROR HANDLER
 // ============================================================
 
-app.delete("/quiz/:code", async (req, res) => {
-  try {
-    if (!databaseReady) {
-      return res.status(500).json({
+app.use((error, req, res, next) => {
+  console.error("SERVER ERROR:", error);
+
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
         success: false,
-        error: "Database is not connected.",
+        error: "PDF is too large. Maximum size is 20 MB.",
       });
     }
 
-    const code = cleanText(req.params.code).toUpperCase();
-
-    const result = await Quiz.deleteOne({
-      code,
-    });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "Quiz not found.",
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: "Quiz deleted.",
-    });
-  } catch (error) {
-    console.error("DELETE QUIZ ERROR:", error);
-
-    return res.status(500).json({
+    return res.status(400).json({
       success: false,
       error: error.message,
     });
   }
-});
 
-// ============================================================
-// 404 HANDLER
-// ============================================================
-
-app.use((req, res) => {
-  return res.status(404).json({
-    success: false,
-
-    error: `Route not found: ${req.method} ${req.originalUrl}`,
-  });
-});
-
-// ============================================================
-// GLOBAL ERROR HANDLER
-// ============================================================
-
-app.use((error, req, res, next) => {
-  console.error("GLOBAL SERVER ERROR:");
-
-  console.error(error);
-
-  if (error instanceof multer.MulterError) {
+  if (error && error.message === "Only PDF files are allowed.") {
     return res.status(400).json({
       success: false,
-      error: `Upload error: ${error.message}`,
+      error: error.message,
     });
   }
 
   return res.status(500).json({
     success: false,
-
     error: error.message || "Internal server error.",
+  });
+});
+
+// ============================================================
+// 404
+// ============================================================
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `Route ${req.method} ${req.originalUrl} not found.`,
   });
 });
 
@@ -1473,37 +1281,17 @@ app.use((error, req, res, next) => {
 // START SERVER
 // ============================================================
 
-async function startServer() {
-  await connectDatabase();
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log("");
-    console.log("==============================================");
-    console.log("       ADVANCE'S QUIZ SERVER");
-    console.log("==============================================");
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-    console.log(`MongoDB: ${databaseReady ? "CONNECTED" : "NOT CONNECTED"}`);
-    console.log(`Gemini: ${model ? GEMINI_MODEL : "NOT CONFIGURED"}`);
-    console.log("==============================================");
-    console.log("");
-  });
-}
-
-startServer();
-
-// ============================================================
-// PROCESS ERROR HANDLERS
-// ============================================================
-
-process.on("unhandledRejection", (error) => {
-  console.error("UNHANDLED PROMISE REJECTION:");
-
-  console.error(error);
-});
-
-process.on("uncaughtException", (error) => {
-  console.error("UNCAUGHT EXCEPTION:");
-
-  console.error(error);
+app.listen(PORT, () => {
+  console.log("");
+  console.log("==============================================");
+  console.log("       ADVANCE'S QUIZ SERVER");
+  console.log("==============================================");
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Health: /health`);
+  console.log("Firebase: Firestore");
+  console.log(
+    `Gemini: ${process.env.GEMINI_API_KEY ? "configured" : "MISSING"}`,
+  );
+  console.log("==============================================");
+  console.log("");
 });
